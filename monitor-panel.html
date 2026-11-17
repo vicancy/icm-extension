@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SignalR Monitor search</title>
+  <link rel="stylesheet" href="monitor-panel.css">
+  <script src="monitor.js" defer></script><script src="monitor-panel.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="heading"><h1>SignalR Monitor</h1><a id="open-monitor" href="https://srprodmonitor.azurewebsites.net/" target="_blank" rel="noopener noreferrer">Open in new tab ↗</a></div>
+    <form id="monitor-search"><label for="monitor-query">Resource name or resource ID</label><div class="search-row"><input id="monitor-query" type="text" autocomplete="off" maxlength="2048" required><button type="submit">Search</button></div></form>
+    <p id="monitor-status" role="status" hidden></p>
+  </header>
+  <main><iframe id="monitor-frame" title="SignalR Monitor resource search" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" hidden></iframe></main>
+</body>
+</html>

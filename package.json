@@ -1,0 +1,15 @@
+{
+  "name": "icm-oncall-workspace",
+  "version": "2.7.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test *.test.js",
+    "preview": "node test/preview-server.js"
+  },
+  "devDependencies": {
+    "jsdom": "31.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.22.2"
+  }
+}

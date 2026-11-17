@@ -1,14 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "ICM Incident State Enhancement",
-  "version": "1.0.0",
-  "description": "Adds a state tracking column to Microsoft ICM incidents.",
-  "permissions": ["storage"],
+  "name": "ICM On-call Workspace",
+  "version": "2.7.0",
+  "description": "Track incidents, keep private notes, mitigate recovered incidents and export your handoff to OneNote.",
+  "permissions": ["storage", "alarms", "contextMenus", "sidePanel"],
+  "host_permissions": ["http://127.0.0.1:4176/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Open On-call Workspace" },
+  "options_page": "dashboard.html",
+  "side_panel": { "default_path": "monitor-panel.html" },
   "content_scripts": [
     {
       "matches": ["https://portal.microsofticm.com/*"],
       "css": ["content.css"],
-      "js": ["content.js"],
+      "js": ["model.js", "client.js", "ui.js", "mitigate.js", "content.js"],
+      "all_frames": true,
       "run_at": "document_idle"
     }
   ]

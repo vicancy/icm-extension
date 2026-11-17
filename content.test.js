@@ -1,729 +1,237 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const M = require('./model');
+const { createRuntime, loadPage, waitFor } = require('./test/runtime');
 
-const source = fs.readFileSync(path.join(__dirname, 'content.js'), 'utf8');
-const prefix = 'icm-incident-tags:';
-const positionKey = 'icm-detail-tag-position';
+const click = element => element.dispatchEvent(new element.ownerDocument.defaultView.MouseEvent('click', { bubbles: true }));
+const set = (doc, name, value) => { const input = doc.querySelector(`[name="${name}"]`); input.value = value; input.dispatchEvent(new doc.defaultView.Event('input', { bubbles: true })); };
+const submit = doc => doc.querySelector('.ico-editor-form').dispatchEvent(new doc.defaultView.Event('submit', { bubbles: true, cancelable: true }));
 
-class Element {
-  constructor(tagName) {
-    this.tagName = tagName;
-    this.children = [];
-    this.dataset = {};
-    this.attributes = {};
-    this.listeners = {};
-    this.properties = {};
-    this.style = { setProperty: (key, value) => { this.properties[key] = value; } };
-    this.className = '';
-    this.selectedValue = '';
-    this.classList = {
-      add: name => { this.className = [...new Set([...this.className.split(' '), name])].join(' '); },
-      remove: name => { this.className = this.className.split(' ').filter(value => value !== name).join(' '); }
-    };
-  }
+test('list controls track an incident and save its private notes without modifying native headers', async t => {
+  const runtime = createRuntime(); const page = loadPage(runtime); t.after(page.close);
+  const d = page.document;
+  await waitFor(() => d.querySelector('.ico-row-actions'));
+  assert.equal(d.querySelector('[role="columnheader"]').textContent, 'Title');
+  assert.equal(d.querySelectorAll('.ico-row-actions').length, 1);
+  click(d.querySelector('[data-action="track"]'));
+  await waitFor(() => d.querySelector('[data-action="track"]').textContent === 'Tracked');
+  click(d.querySelector('[data-action="notes"]'));
+  set(d, 'rootCause', 'Regional capacity exhausted'); set(d, 'resolution', 'Requested more capacity'); set(d, 'notes', 'Waiting for the owning team');
+  submit(d);
+  await waitFor(() => !d.querySelector('.ico-editor'));
+  const entry = M.currentReport(await runtime.request('get')).entries['123'];
+  assert.equal(entry.title, 'A sample incident'); assert.equal(entry.severity, '3'); assert.equal(entry.status, 'Active');
+  assert.equal(entry.rootCause, 'Regional capacity exhausted'); assert.equal(entry.notes, 'Waiting for the owning team');
+  assert.ok(d.querySelector('.ico-has-notes'));
+  assert.ok(runtime.messages.every(message => message.type.startsWith('oncall:')));
+});
 
-  appendChild(child) {
-    this.children.push(child);
-    child.parent = this;
-    return child;
-  }
+test('recycled rows and removed controls bind to the current incident ID', async t => {
+  const runtime = createRuntime(); const page = loadPage(runtime); t.after(page.close); const d = page.document;
+  await waitFor(() => d.querySelector('.ico-row-actions'));
+  const link = d.querySelector('[data-automation-key="Title"] a');
+  link.href = 'https://portal.microsofticm.com/imp/v5/incidents/details/456'; link.textContent = 'The next incident';
+  await waitFor(() => d.querySelector('[data-action="track"]').getAttribute('aria-label') === 'Track incident 456');
+  click(d.querySelector('[data-action="track"]'));
+  await waitFor(() => d.querySelector('[data-action="track"]').textContent === 'Tracked');
+  const report = M.currentReport(await runtime.request('get'));
+  assert.equal(report.entries['123'], undefined); assert.equal(report.entries['456'].title, 'The next incident');
+  d.querySelector('.ico-row-actions').remove();
+  await waitFor(() => d.querySelector('.ico-row-actions'));
+  assert.equal(d.querySelectorAll('.ico-row-actions').length, 1);
+  assert.equal(d.querySelector('[data-action="track"]').textContent, 'Tracked');
+});
 
-  append(...children) {
-    children.forEach(child => this.appendChild(child));
-  }
+test('a failed save leaves the draft visible and retry succeeds', async t => {
+  const runtime = createRuntime(); const page = loadPage(runtime); t.after(page.close); const d = page.document;
+  await waitFor(() => d.querySelector('.ico-row-actions'));
+  click(d.querySelector('[data-action="notes"]')); set(d, 'notes', 'Do not lose this draft');
+  runtime.failWrites(); submit(d);
+  assert.equal(d.querySelector('[name="notes"]').disabled, true);
+  await waitFor(() => d.querySelector('.ico-form-status')?.textContent.includes('quota'));
+  assert.equal(d.querySelector('[name="notes"]').disabled, false);
+  assert.equal(d.querySelector('[name="notes"]').value, 'Do not lose this draft');
+  runtime.failWrites(false); submit(d); await waitFor(() => !d.querySelector('.ico-editor'));
+  const entry = M.currentReport(await runtime.request('get')).entries['123'];
+  assert.equal(entry.notes, 'Do not lose this draft'); assert.equal(entry.tracked, false);
+});
 
-  get isConnected() {
-    return this.tagName === 'body' || !!this.parent?.isConnected;
-  }
+test('concurrent notes edits report a conflict without replacing the unsaved draft', async t => {
+  const runtime = createRuntime(); const page = loadPage(runtime); t.after(page.close); const d = page.document;
+  await waitFor(() => d.querySelector('.ico-row-actions'));
+  click(d.querySelector('[data-action="notes"]')); set(d, 'notes', 'My unsaved draft');
+  const db = await runtime.request('get');
+  await runtime.request('save', { reportId: db.activeReportId, incidentId: '123', patch: { notes: 'Saved in another tab' } });
+  assert.equal(d.querySelector('[name="notes"]').value, 'My unsaved draft'); submit(d);
+  await waitFor(() => d.querySelector('.ico-form-status')?.textContent.includes('another window'));
+  assert.equal(M.currentReport(await runtime.request('get')).entries['123'].notes, 'Saved in another tab');
+});
 
-  contains(element) {
-    return this === element || this.children.some(child => child.contains(element));
-  }
+test('switching reports while an editor is open does not move its notes into the new report', async t => {
+  const runtime = createRuntime(); const page = loadPage(runtime); t.after(page.close); const d = page.document;
+  await waitFor(() => d.querySelector('.ico-row-actions'));
+  const first = await runtime.request('get');
+  click(d.querySelector('[data-action="notes"]')); set(d, 'notes', 'For the first report');
+  await runtime.request('create-report', { fields: { name: 'Next report' } }); submit(d);
+  await waitFor(() => !d.querySelector('.ico-editor'));
+  const db = await runtime.request('get');
+  assert.equal(M.currentReport(db, first.activeReportId).entries['123'].notes, 'For the first report');
+  assert.equal(M.currentReport(db).entries['123'], undefined);
+});
 
-  getBoundingClientRect() {
-    if (this.tagName === 'summary') return this.parent.getBoundingClientRect();
-    const width = this.width || 148;
-    const height = 36;
-    const left = this.style.left ? parseFloat(this.style.left) : 1024 - width - 24;
-    const top = this.style.top ? parseFloat(this.style.top) : 768 - height - 24;
-    return { left, top, width, height, bottom: top + height };
-  }
+test('embedded incident pages share notes with the list and follow detail route changes', async t => {
+  const runtime = createRuntime(); const parent = loadPage(runtime); const frame = loadPage(runtime, { embedded: true, url: 'https://portal.microsofticm.com/imp/v5/incidents/details/123/summary', html: '<title>Incident 123 : A sample incident - IcM</title><h1>A sample incident</h1>' });
+  t.after(parent.close); t.after(frame.close);
+  await waitFor(() => frame.document.querySelector('.ico-detail-actions'));
+  assert.equal(frame.document.querySelector('.ico-toolbar'), null);
+  click(frame.document.querySelector('[data-action="track"]'));
+  await waitFor(() => parent.document.querySelector('[data-action="track"]')?.textContent === 'Tracked');
+  click(frame.document.querySelector('[data-action="notes"]')); set(frame.document, 'rootCause', 'Dependency timeout'); submit(frame.document);
+  await waitFor(() => !frame.document.querySelector('.ico-editor'));
+  assert.ok(parent.document.querySelector('.ico-has-notes'));
+  frame.window.history.pushState({}, '', '/imp/v5/incidents/details/456/summary');
+  await waitFor(() => frame.document.querySelector('[data-action="track"]').getAttribute('aria-label') === 'Track incident 456');
+  click(frame.document.querySelector('[data-action="track"]'));
+  await waitFor(() => frame.document.querySelector('[data-action="track"]').textContent === 'Tracked');
+  const report = M.currentReport(await runtime.request('get'));
+  assert.equal(report.entries['123'].rootCause, 'Dependency timeout'); assert.equal(report.entries['456'].rootCause, '');
+  assert.equal(report.entries['456'].title, '');
+});
 
-  setPointerCapture(pointerId) { this.pointerId = pointerId; }
-  hasPointerCapture(pointerId) { return this.pointerId === pointerId; }
-  releasePointerCapture() { this.pointerId = null; }
+test('native status changes update the snapshot without overwriting annotations', async t => {
+  const runtime = createRuntime(); const page = loadPage(runtime); t.after(page.close); const d = page.document;
+  await waitFor(() => d.querySelector('.ico-row-actions'));
+  click(d.querySelector('[data-action="track"]')); await waitFor(() => d.querySelector('[data-action="track"]').textContent === 'Tracked');
+  const reportId = (await runtime.request('get')).activeReportId;
+  await runtime.request('save', { reportId, incidentId: '123', patch: { resolution: 'Restarted worker' } });
+  d.querySelector('[data-automation-key="State"]').textContent = 'Mitigated';
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].status === 'Mitigated');
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['123'].resolution, 'Restarted worker');
+});
 
-  insertBefore(child, reference) {
-    const index = this.children.indexOf(reference);
-    if (index < 0) return this.appendChild(child);
-    this.children.splice(index, 0, child);
-    child.parent = this;
-    return child;
-  }
+test('Created Time backfills legacy records and follows recycled rows without converting timezones', async t => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  await runtime.request('save', { reportId, incidentId: '123', patch: { tracked: true, notes: 'Keep my analysis' } });
+  delete runtime.data[M.STORAGE_KEY].reports[0].entries['123'].day;
+  const page = loadPage(runtime, { html: `<title>Incident Queries - IcM</title>
+    <div class="ms-DetailsRow" role="row">
+      <div data-automation-key="ModifiedDate">2026-11-20 12:00 GMT+8</div>
+      <div data-automation-key="CreatedDate"><time datetime="2026-11-15T16:30:00Z">2026-11-16 00:30 GMT+8</time></div>
+      <div data-automation-key="Title"><a href="/imp/v5/incidents/details/123">A sample incident</a></div>
+    </div>` });
+  t.after(page.close); const d = page.document;
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].day === '2026-11-16');
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['123'].notes, 'Keep my analysis');
+  click(d.querySelector('[data-action="notes"]'));
+  assert.equal(d.querySelector('[name="day"]').readOnly, true);
+  assert.equal(d.querySelector('[name="day"]').value, '2026-11-16');
+  submit(d); await waitFor(() => !d.querySelector('.ico-editor'));
+  const link = d.querySelector('[data-automation-key="Title"] a');
+  link.href = '/imp/v5/incidents/details/456'; link.textContent = 'Next incident';
+  d.querySelector('[data-automation-key="CreatedDate"] time').textContent = '2026-11-17 01:00 GMT+8';
+  await waitFor(() => d.querySelector('[data-action="track"]').getAttribute('aria-label') === 'Track incident 456');
+  click(d.querySelector('[data-action="track"]'));
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['456']?.day === '2026-11-17');
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['123'].day, '2026-11-16');
+});
 
-  remove() {
-    this.parent.children.splice(this.parent.children.indexOf(this), 1);
-  }
+test('detail Day uses Incident created, never source, impact, comments or stale route metadata', async t => {
+  const runtime = createRuntime();
+  const page = loadPage(runtime, { url: 'https://portal.microsofticm.com/imp/v5/incidents/details/123/summary', html: `
+    <title>Incident 123 : A sample incident - IcM</title>
+    <div><h3>Impact start</h3><h3><time>2026-11-13 22:00 GMT+8</time></h3></div>
+    <div><h3>Source created</h3><h3><time>2026-11-15 23:59 GMT+8</time></h3></div>
+    <p>Created at 2026-11-14 08:00 GMT+8</p>` });
+  t.after(page.close); const d = page.document;
+  await waitFor(() => d.querySelector('.ico-detail-actions'));
+  click(d.querySelector('[data-action="track"]'));
+  await waitFor(() => d.querySelector('[data-action="track"]').textContent === 'Tracked');
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['123'].day, '');
+  const dateCard = d.createElement('div');
+  dateCard.innerHTML = '<h3>Incident created</h3><h3><time datetime="2026-11-15T16:01:00Z">2026-11-16 00:01 GMT+8</time></h3>';
+  d.body.append(dateCard);
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].day === '2026-11-16');
+  page.window.history.pushState({}, '', '/imp/v5/incidents/details/456/summary');
+  await waitFor(() => d.querySelector('[data-action="track"]').getAttribute('aria-label') === 'Track incident 456');
+  click(d.querySelector('[data-action="track"]'));
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['456']);
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['456'].day, '');
+});
 
-  set innerHTML(value) {
-    assert.ok(value === '' || value.startsWith('<svg '));
-    this.children = [];
-  }
+test('a date already visible in the list is captured when an incident is tracked from elsewhere', async t => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  const page = loadPage(runtime, { html: `<title>Incident Queries - IcM</title>
+    <div class="ms-DetailsRow" role="row">
+      <div data-automation-key="CreatedDate">2026-11-16 00:30 GMT+8</div>
+      <div data-automation-key="State">Active</div>
+      <div data-automation-key="Title"><a href="/imp/v5/incidents/details/123">A sample incident</a></div>
+    </div>` });
+  t.after(page.close);
+  await waitFor(() => page.document.querySelector('.ico-row-actions'));
+  await runtime.agentRequest({ method: 'save_incident', params: { reportId, incidentId: '123',
+    fields: { title: 'Updated title', status: 'Mitigated', notes: 'Keep my analysis' } } });
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].day === '2026-11-16');
+  const entry = M.currentReport(await runtime.request('get')).entries['123'];
+  assert.equal(entry.title, 'Updated title'); assert.equal(entry.status, 'Mitigated');
+  assert.equal(entry.notes, 'Keep my analysis');
+  assert.equal(runtime.messages.filter(message => message.type === 'oncall:observe').length, 1);
+  assert.deepEqual(runtime.messages.find(message => message.type === 'oncall:observe').snapshots, [{ id: '123', day: '2026-11-16' }]);
+});
 
-  get options() {
-    return this.children;
-  }
+test('a stale tab cannot repeatedly overwrite metadata observed in another tab', async t => {
+  const runtime = createRuntime(); const older = loadPage(runtime); const newer = loadPage(runtime);
+  t.after(older.close); t.after(newer.close);
+  await waitFor(() => older.document.querySelector('.ico-row-actions') && newer.document.querySelector('.ico-row-actions'));
+  click(older.document.querySelector('[data-action="track"]'));
+  await waitFor(() => newer.document.querySelector('[data-action="track"]').textContent === 'Tracked');
+  newer.document.querySelector('[data-automation-key="State"]').textContent = 'Mitigated';
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].status === 'Mitigated');
+  older.document.body.append(older.document.createElement('p'));
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['123'].status, 'Mitigated');
+  assert.equal(runtime.messages.filter(message => message.type === 'oncall:observe').length, 1);
+  older.document.querySelector('[data-automation-key="State"]').textContent = 'Resolved';
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].status === 'Resolved');
+});
 
-  set value(value) {
-    this.selectedValue = value;
-  }
-
-  get value() {
-    if (this.tagName !== 'select') return this.selectedValue;
-    return this.children.some(option => option.value === this.selectedValue)
-      ? this.selectedValue : '';
-  }
-
-  get selectedIndex() {
-    return this.children.findIndex(option => option.value === this.selectedValue);
-  }
-
-  setAttribute(name, value) {
-    this.attributes[name] = value;
-  }
-
-  getAttribute(name) {
-    return this.attributes[name] ?? null;
-  }
-
-  addEventListener(name, listener, options) {
-    this.listeners[name] = (...args) => {
-      if (!options?.signal?.aborted) return listener(...args);
-    };
-  }
-
-  querySelector(selector) {
-    for (const child of this.children) {
-      if (child.tagName === selector || child.className.split(' ').some(name => `.${name}` === selector)) return child;
-      const descendant = child.querySelector(selector);
-      if (descendant) return descendant;
-    }
-    return null;
-  }
-
-  closest(selector) {
-    if (selector.split(', ').includes(`.${this.className}`)) return this;
-    return this.parent?.closest(selector) || null;
-  }
-}
-
-function createHarness() {
-  const data = {};
-  const localData = {};
-  const grids = [];
-  const timers = new Map();
-  const intervals = [];
-  const errors = [];
-  const alerts = [];
-  const documentEvents = {};
-  let storageListener;
-  let mutationListener;
-  let rejectWrites = false;
-  let writeError = 'Storage write failed';
-  let rejectReads = false;
-  let rejectLocalWrites = false;
-  let rejectPositionReads = false;
-  const localWrites = [];
-  const windowEvents = {};
-  let timerId = 0;
-  const context = {
-    console: { error: (...args) => errors.push(args) },
-    location: { href: 'https://portal.microsofticm.com/imp/v5/incidents/search', pathname: '/imp/v5/incidents/search' },
-    AbortController,
-    setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
-    clearTimeout(id) { timers.delete(id); },
-    setInterval(callback) { intervals.push(callback); },
-    MutationObserver: class {
-      constructor(callback) { mutationListener = callback; }
-      observe() {}
-    },
-    Node: { ELEMENT_NODE: 1 },
-    document: {
-      readyState: 'loading',
-      body: new Element('body'),
-      createElement: name => new Element(name),
-      addEventListener: (name, callback) => { documentEvents[name] = callback; },
-      querySelectorAll: selector => selector === '.searchresults-k-grid' ? grids : []
-    },
-    window: {
-      innerWidth: 1024, innerHeight: 768,
-      alert: message => alerts.push(message),
-      addEventListener(name, listener, options) {
-        (windowEvents[name] ||= []).push(() => {
-          if (!options?.signal?.aborted) listener();
-        });
-      }
-    },
-    chrome: {
-      storage: {
-        local: {
-          async get(key) {
-            if (rejectPositionReads && key === positionKey) throw new Error('Local position read failed');
-            return { ...localData };
-          },
-          async set(values) {
-            if (rejectLocalWrites) throw new Error('Local storage write failed');
-            localWrites.push(values);
-            Object.assign(localData, values);
-          }
-        },
-        sync: {
-          async get() {
-            if (rejectReads) throw new Error('Storage read failed');
-            return { ...data };
-          },
-          async set(values) {
-            if (rejectWrites) throw new Error(writeError);
-            Object.assign(data, values);
-          },
-          async remove(keys) {
-            if (rejectWrites) throw new Error(writeError);
-            for (const key of Array.isArray(keys) ? keys : [keys]) delete data[key];
-          }
-        },
-        onChanged: { addListener: listener => { storageListener = listener; } }
-      }
-    }
+test('OneNote copy includes all tracked rows even when the dashboard is filtered', async t => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  for (const [id, day] of [['123', '2026-11-14'], ['456', '2026-11-16']]) await runtime.request('save', { reportId, incidentId: id, patch: { tracked: true, day, title: `Sample ${id}`, notes: 'First line\nSecond line' } });
+  const page = loadPage(runtime, { dashboard: true }); t.after(page.close); const d = page.document;
+  const copied = {};
+  d.execCommand = command => {
+    assert.equal(command, 'copy');
+    const event = new page.window.Event('copy', { cancelable: true });
+    event.clipboardData = { setData(type, value) { copied[type] = value; } };
+    d.dispatchEvent(event); return true;
   };
-  vm.runInNewContext(source.replace(/\}\)\(\);\s*$/, `
-    globalThis.api = {
-      loadData, enhanceGrid, enhanceDetailPage, refreshAllGrids, migrateLocalData,
-      saveTag, saveTagName, saveTagColor, deleteTag, changeTag,
-      getTagsSignature: () => JSON.stringify(Array.from(tagsMap.values()))
-    };
-  })();`), context);
-
-  function setTag(id, name, color) {
-    data[`${prefix}tag:${id}:meta`] = { id };
-    data[`${prefix}tag:${id}:name`] = { value: name };
-    data[`${prefix}tag:${id}:color`] = { value: color };
-  }
-
-  function addGrid(incidentId = '123') {
-    const row = new Element('tr');
-    row.link = { href: `https://portal.microsofticm.com/imp/v5/incidents/details/${incidentId}/summary` };
-    const querySelector = row.querySelector.bind(row);
-    row.querySelector = selector => selector.startsWith('a[href') ? row.link : querySelector(selector);
-    const colgroup = { querySelector: () => ({}) };
-    const headerFilter = {
-      _tagsSignature: null,
-      updates: 0,
-      _updateMenuContent() {
-        this._tagsSignature = context.api.getTagsSignature();
-        this.updates++;
-      }
-    };
-    const headerRow = {
-      querySelector: selector => selector === '.icm-ext-state-filter' ? headerFilter : {}
-    };
-    const header = {
-      dataset: { icmExtStateWidthReserved: 'true' },
-      querySelector: selector => selector === 'colgroup' ? colgroup : headerRow
-    };
-    const body = {
-      ...header,
-      querySelectorAll: () => [row]
-    };
-    const grid = {
-      querySelector: selector => selector === '.k-grid-header table' ? header : body,
-      querySelectorAll: () => [row]
-    };
-    grids.push(grid);
-    return {
-      grid, headerFilter,
-      row,
-      get select() { return row.querySelector('.icm-ext-state-td')?.querySelector('.icm-ext-state-select'); }
-    };
-  }
-
-  return {
-    ...context.api, data, localData, localWrites, grids, errors, alerts, setTag, addGrid, context, intervals,
-    init: () => documentEvents.DOMContentLoaded(),
-    rejectWrites: (message = 'Storage write failed') => { rejectWrites = true; writeError = message; },
-    allowWrites: () => { rejectWrites = false; },
-    rejectReads: () => { rejectReads = true; },
-    rejectLocalWrites: () => { rejectLocalWrites = true; },
-    allowLocalWrites: () => { rejectLocalWrites = false; },
-    rejectPositionReads: () => { rejectPositionReads = true; },
-    storageChanged: (key, area = 'sync') => storageListener({ [key]: { newValue: localData[key] } }, area),
-    resize(width, height) {
-      context.window.innerWidth = width;
-      context.window.innerHeight = height;
-      windowEvents.resize?.forEach(listener => listener());
-    },
-    visitDetail(id = '123') {
-      context.location.pathname = `/imp/v5/incidents/details/${id}/summary`;
-      context.location.href = `https://portal.microsofticm.com${context.location.pathname}`;
-    },
-    get detail() { return context.document.body.querySelector('.icm-ext-detail-state'); },
-    mutate: mutations => mutationListener(mutations),
-    flushTimers() {
-      const callbacks = Array.from(timers.values());
-      timers.clear();
-      callbacks.forEach(callback => callback());
-    }
-  };
-}
-
-function pointer(summary, type, values = {}) {
-  const event = {
-    pointerId: 1, isPrimary: true, button: 0, clientX: 880, clientY: 720, detail: 1,
-    preventDefault() { this.defaultPrevented = true; },
-    stopPropagation() {},
-    ...values
-  };
-  return { event, result: summary.listeners[type](event) };
-}
-
-test('detail Tag drags save once locally and restore across cases and browser sessions', async () => {
-  const h = createHarness();
-  h.visitDetail();
-  await h.init();
-  const summary = h.detail.querySelector('summary');
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: 280, clientY: 220 });
-  assert.equal(h.detail.style.left, '252px');
-  assert.equal(h.detail.style.top, '208px');
-  assert.equal(h.localData[positionKey], undefined);
-  await pointer(summary, 'pointerup', { clientX: 280, clientY: 220 }).result;
-  assert.deepEqual({ ...h.localData[positionKey] }, { x: 252, y: 208 });
-  assert.equal(h.localWrites.filter(write => positionKey in write).length, 1);
-  assert.equal(h.data[positionKey], undefined);
-  assert.equal(pointer(summary, 'click').event.defaultPrevented, true);
-  assert.equal(pointer(summary, 'click', { detail: 0 }).event.defaultPrevented, undefined);
-
-  h.visitDetail('456');
-  h.enhanceDetailPage();
-  assert.equal(h.detail.style.left, '252px');
-  assert.equal(h.detail.dataset.incidentId, '456');
-  assert.equal(h.context.document.body.children.length, 2);
-  const reloaded = createHarness();
-  Object.assign(reloaded.localData, h.localData);
-  reloaded.visitDetail();
-  await reloaded.init();
-  assert.equal(reloaded.detail.style.top, '208px');
+  await waitFor(() => d.querySelectorAll('#incidents tr').length === 2);
+  d.querySelector('#search').value = '123'; d.querySelector('#search').dispatchEvent(new page.window.Event('input'));
+  assert.equal(d.querySelectorAll('#incidents tr').length, 1);
+  click(d.querySelector('#copy'));
+  await waitFor(() => copied['text/html']);
+  const exported = new page.window.DOMParser().parseFromString(copied['text/html'], 'text/html');
+  assert.equal(exported.querySelectorAll('tbody tr').length, 2);
+  assert.equal(exported.querySelectorAll('th').length, 11);
+  assert.deepEqual([...exported.querySelectorAll('tbody tr')].map(row => row.firstElementChild.textContent).sort(), ['2026-11-14', '2026-11-16']);
+  assert.match(copied['text/html'], /details\/456\/summary/);
+  assert.match(copied['text/html'], /First line<br>Second line/);
+  assert.match(copied['text/plain'], /Sample 123/);
 });
 
-test('detail Tag clicks and sub-threshold movement neither drag nor save', async () => {
-  const h = createHarness();
-  h.visitDetail();
-  await h.init();
-  const summary = h.detail.querySelector('summary');
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: 882, clientY: 722 });
-  await pointer(summary, 'pointerup', { clientX: 882, clientY: 722 }).result;
-  assert.equal(pointer(summary, 'click').event.defaultPrevented, undefined);
-  assert.equal(h.localData[positionKey], undefined);
-  assert.equal(h.detail.style.left, '');
-  pointer(summary, 'pointerdown', { button: 2 });
-  pointer(summary, 'pointermove', { clientX: 200 });
-  assert.equal(h.detail.style.left, '');
-});
-
-test('detail Tag stays in the viewport on drag, resize and summary width changes', async () => {
-  const h = createHarness();
-  h.localData[positionKey] = { x: 800, y: 700 };
-  h.visitDetail();
-  await h.init();
-  h.resize(400, 300);
-  assert.equal(h.detail.style.left, '244px');
-  assert.equal(h.detail.style.top, '256px');
-  h.resize(1024, 768);
-  assert.equal(h.detail.style.left, '800px');
-  h.detail.width = 300;
-  h.refreshAllGrids();
-  assert.equal(h.detail.style.left, '716px');
-  const summary = h.detail.querySelector('summary');
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: -500, clientY: -500 });
-  await pointer(summary, 'pointerup', { clientX: -500, clientY: -500 }).result;
-  assert.deepEqual({ ...h.localData[positionKey] }, { x: 8, y: 8 });
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: 5000, clientY: 5000 });
-  await pointer(summary, 'pointerup', { clientX: 5000, clientY: 5000 }).result;
-  assert.deepEqual({ ...h.localData[positionKey] }, { x: 716, y: 724 });
-});
-
-test('cancelled and lost-capture drags restore the saved position without writes', async () => {
-  const h = createHarness();
-  h.localData[positionKey] = { x: 120, y: 150 };
-  h.visitDetail();
-  await h.init();
-  const summary = h.detail.querySelector('summary');
-  for (const type of ['pointercancel', 'lostpointercapture']) {
-    pointer(summary, 'pointerdown');
-    pointer(summary, 'pointermove', { clientX: 200, clientY: 200 });
-    pointer(summary, type);
-    assert.equal(h.detail.style.left, '120px');
-    assert.equal(h.detail.style.top, '150px');
-  }
-  assert.equal(h.localWrites.filter(write => positionKey in write).length, 0);
-});
-
-test('dragging an open detail Tag keeps the menu anchored without toggling it', async () => {
-  const h = createHarness();
-  h.visitDetail();
-  await h.init();
-  const summary = h.detail.querySelector('summary');
-  const menu = h.context.document.body.querySelector('.icm-ext-state-filter-menu');
-  menu.getBoundingClientRect = () => ({ width: 232, height: 200 });
-  h.detail.open = true;
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: 220, clientY: 180 });
-  await pointer(summary, 'pointerup', { clientX: 220, clientY: 180 }).result;
-  assert.equal(h.detail.style.left, '192px');
-  assert.equal(menu.style.left, '192px');
-  assert.equal(menu.style.top, '206px');
-  assert.equal(pointer(summary, 'click').event.defaultPrevented, true);
-  assert.equal(h.detail.open, true);
-});
-
-test('cancelled first drags return to the default and disposed controls ignore pointer events', async () => {
-  const h = createHarness();
-  h.visitDetail();
-  await h.init();
-  const summary = h.detail.querySelector('summary');
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: 200, clientY: 200 });
-  pointer(summary, 'pointercancel');
-  assert.equal(h.detail.style.left, '');
-  assert.equal(h.localData[positionKey], undefined);
-  h.visitDetail('456');
-  h.enhanceDetailPage();
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: 200 });
-  await pointer(summary, 'pointerup', { clientX: 200 }).result;
-  assert.equal(h.localData[positionKey], undefined);
-});
-
-test('local position updates move existing detail controls without touching synced Tags', async () => {
-  const h = createHarness();
-  h.visitDetail();
-  await h.init();
-  h.localData[positionKey] = { x: 100, y: 200 };
-  await h.storageChanged(positionKey, 'local');
-  assert.equal(h.detail.style.left, '100px');
-  delete h.localData[positionKey];
-  await h.storageChanged(positionKey, 'local');
-  assert.equal(h.detail.style.left, '');
-});
-
-test('position save failures notify explicitly and later drags can save again', async () => {
-  const h = createHarness();
-  h.visitDetail();
-  await h.init();
-  h.rejectLocalWrites();
-  const summary = h.detail.querySelector('summary');
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientX: 200 });
-  await pointer(summary, 'pointerup', { clientX: 200 }).result;
-  assert.equal(h.localData[positionKey], undefined);
-  assert.equal(h.errors.length, 1);
-  assert.match(h.alerts[0], /保存 Tag 位置失败/);
-  h.allowLocalWrites();
-  pointer(summary, 'pointerdown');
-  pointer(summary, 'pointermove', { clientY: 200 });
-  await pointer(summary, 'pointerup', { clientY: 200 }).result;
-  assert.ok(h.localData[positionKey]);
-});
-
-test('invalid or unreadable saved positions report errors without blocking Tag initialization', async () => {
-  for (const value of [{ x: -1, y: 3 }, { x: '10', y: 3 }, { x: Infinity, y: 3 }, 'read-error']) {
-    const h = createHarness();
-    h.visitDetail();
-    if (value === 'read-error') h.rejectPositionReads();
-    else h.localData[positionKey] = value;
-    await h.init();
-    assert.ok(h.detail);
-    assert.equal(h.errors.length, 1);
-    assert.match(h.alerts[0], /读取 Tag 位置失败/);
-  }
-});
-
-test('returning to cached Search rows applies Case edits and new Tag options', async () => {
-  const h = createHarness();
-  h.setTag('old', 'Old', '#E6194B');
-  h.data[`${prefix}incident:123`] = { tagId: 'old' };
-  const fixture = h.addGrid();
-  await h.init();
-  h.enhanceGrid();
-  const originalSelect = fixture.select;
-  assert.equal(originalSelect.value, 'old');
-
-  h.grids.length = 0;
-  h.setTag('new', 'New', '#3CB44B');
-  h.data[`${prefix}incident:123`] = { tagId: 'new' };
-  await h.storageChanged(`${prefix}incident:123`);
-  assert.equal(originalSelect.value, 'old');
-
-  h.grids.push(fixture.grid);
-  const previousHeaderUpdates = fixture.headerFilter.updates;
-  h.enhanceGrid();
-  assert.equal(fixture.select, originalSelect);
-  assert.equal(fixture.select.value, 'new');
-  assert.equal(fixture.select.options[2].textContent, 'New');
-  assert.equal(fixture.select.properties['--tag-bg'], '#3CB44B');
-  assert.equal(fixture.row.hidden, false);
-  assert.equal(fixture.headerFilter.updates, previousHeaderUpdates + 1);
-
-  const options = [...fixture.select.options];
-  const headerUpdates = fixture.headerFilter.updates;
-  h.enhanceGrid();
-  assert.equal(fixture.headerFilter.updates, headerUpdates);
-  assert.deepEqual(fixture.select.options, options);
-  options.forEach((option, index) => assert.equal(fixture.select.options[index], option));
-});
-
-test('a recycled Search row reads and saves the current Incident ID', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  h.setTag('two', 'Two', '#3CB44B');
-  h.data[`${prefix}incident:123`] = { tagId: 'one' };
-  h.data[`${prefix}incident:456`] = { tagId: 'two' };
-  const fixture = h.addGrid();
-  await h.loadData();
-  h.enhanceGrid();
-
-  fixture.row.link.href = 'https://portal.microsofticm.com/imp/v5/incidents/details/456/summary';
-  h.enhanceGrid();
-  assert.equal(fixture.select.value, 'two');
-  assert.equal(fixture.select.getAttribute('aria-label'), '事件 456 的 Tag');
-  fixture.select.value = 'one';
-  await fixture.select.listeners.change({ stopPropagation() {}, currentTarget: fixture.select });
-  assert.equal(h.data[`${prefix}incident:456`].tagId, 'one');
-  assert.equal(h.data[`${prefix}incident:123`].tagId, 'one');
-});
-
-test('cross-tab changes refresh visible Search values, names and colors', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  const fixture = h.addGrid();
-  await h.init();
-  h.enhanceGrid();
-  h.setTag('one', 'Renamed', '#3CB44B');
-  h.data[`${prefix}incident:123`] = { tagId: 'one' };
-  await h.storageChanged(`${prefix}incident:123`);
-  assert.equal(fixture.select.value, 'one');
-  assert.equal(fixture.select.options[1].textContent, 'Renamed');
-  assert.equal(fixture.select.properties['--tag-bg'], '#3CB44B');
-
-  h.data[`${prefix}incident:123`] = { tagId: null };
-  await h.storageChanged(`${prefix}incident:123`);
-  assert.equal(fixture.select.value, '');
-  assert.equal(fixture.select.properties['--tag-bg'], '#fff');
-});
-
-test('failed Search writes restore the previous Tag and notify the user', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  h.setTag('two', 'Two', '#3CB44B');
-  h.data[`${prefix}incident:123`] = { tagId: 'one' };
-  const fixture = h.addGrid();
-  await h.loadData();
-  h.enhanceGrid();
-  h.rejectWrites();
-  fixture.select.value = 'two';
-  await fixture.select.listeners.change({ stopPropagation() {}, currentTarget: fixture.select });
-  assert.equal(fixture.select.value, 'one');
-  assert.equal(h.data[`${prefix}incident:123`].tagId, 'one');
-  assert.equal(h.errors.length, 1);
-  assert.equal(h.alerts.length, 1);
-  assert.match(h.alerts[0], /具体错误：Storage write failed/);
-});
-
-test('invalidated extension writes explain that existing ICM pages need refreshing', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  h.data[`${prefix}incident:123`] = { tagId: 'one' };
-  const fixture = h.addGrid();
-  await h.init();
-  h.rejectWrites('Extension context invalidated.');
-  fixture.select.value = '';
-  await fixture.select.listeners.change({ stopPropagation() {}, currentTarget: fixture.select });
-  assert.equal(fixture.select.value, 'one');
-  assert.match(h.alerts[0], /刷新所有已打开的 ICM 页面/);
-  assert.match(h.alerts[0], /具体错误：Extension context invalidated\./);
-  assert.doesNotMatch(h.alerts[0], /容量已满/);
-});
-
-test('storage quota failures show the exact cause and matching recovery advice', async () => {
-  for (const [reason, advice] of [
-    ['MAX_WRITE_OPERATIONS_PER_MINUTE quota exceeded', /至少一分钟/],
-    ['MAX_WRITE_OPERATIONS_PER_HOUR quota exceeded', /每小时限制/],
-    ['QUOTA_BYTES_PER_ITEM quota exceeded', /缩短 Tag 名称/],
-    ['QUOTA_BYTES quota exceeded', /总容量已满/],
-    ['MAX_ITEMS quota exceeded', /记录数/],
-    ['Storage is unavailable', /请提供下方的具体错误/]
-  ]) {
-    const h = createHarness();
-    h.setTag('one', 'One', '#E6194B');
-    await h.init();
-    h.rejectWrites(reason);
-    assert.equal(await h.changeTag(() => h.saveTagName('one', 'Failed')), false);
-    assert.match(h.alerts[0], advice);
-    assert.ok(h.alerts[0].includes(`具体错误：${reason}`));
-    assert.equal(h.data[`${prefix}tag:one:name`].value, 'One');
-  }
-});
-
-test('route changes and link attribute mutations reconcile existing Search rows', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  const fixture = h.addGrid();
-  await h.init();
-  h.data[`${prefix}incident:123`] = { tagId: 'one' };
-  await h.loadData();
-  h.context.location.href += '?page=2';
-  h.intervals[0]();
-  assert.equal(fixture.select.value, 'one');
-
-  fixture.row.link.href = 'https://portal.microsofticm.com/imp/v5/incidents/details/456/summary';
-  h.mutate([{ type: 'attributes', target: fixture.row, addedNodes: [] }]);
-  h.flushTimers();
-  assert.equal(fixture.select.value, '');
-  assert.equal(fixture.select.getAttribute('aria-label'), '事件 456 的 Tag');
-});
-
-test('local records migrate once, retaining the local backup and unrelated settings', async () => {
-  const h = createHarness();
-  const meta = `${prefix}tag:one:meta`;
-  const name = `${prefix}tag:one:name`;
-  const color = `${prefix}tag:one:color`;
-  const incident = `${prefix}incident:123`;
-  Object.assign(h.localData, {
-    [meta]: { id: 'one' },
-    [name]: { value: 'Local' },
-    [color]: { value: '#E6194B' },
-    [incident]: { tagId: 'one' },
-    unrelated: true
-  });
-  const fixture = h.addGrid();
-  await h.init();
-  assert.equal(fixture.select.value, 'one');
-  for (const key of [meta, name, color, incident]) {
-    assert.deepEqual(h.data[key], h.localData[key]);
-  }
-  assert.equal(h.data.unrelated, undefined);
-  assert.equal(h.localData['icm-sync-migration-v1'], true);
-  delete h.data[incident];
-  await h.migrateLocalData();
-  assert.equal(h.data[incident], undefined);
-  assert.equal(h.localData[incident].tagId, 'one');
-});
-
-test('migration preserves cloud conflicts, cleared incidents and deleted Tag tombstones', async () => {
-  const h = createHarness();
-  h.setTag('one', 'Cloud', '#3CB44B');
-  const name = `${prefix}tag:one:name`;
-  const incident = `${prefix}incident:123`;
-  h.data[incident] = { tagId: null, updatedAt: 20 };
-  h.data[`${prefix}tag:deleted:meta`] = { id: 'deleted', deletedAt: 20 };
-  Object.assign(h.localData, {
-    [name]: { value: 'Local', updatedAt: 30 },
-    [incident]: { tagId: 'one', updatedAt: 30 },
-    [`${prefix}tag:deleted:meta`]: { id: 'deleted' },
-    [`${prefix}tag:deleted:name`]: { value: 'Deleted' },
-    [`${prefix}tag:deleted:color`]: { value: '#E6194B' }
-  });
-  await h.migrateLocalData();
-  assert.equal(h.data[name].value, 'Cloud');
-  assert.equal(h.data[incident].tagId, null);
-  assert.equal(h.data[`${prefix}tag:deleted:name`], undefined);
-  assert.equal(h.data[`${prefix}tag:deleted:color`], undefined);
-  await h.loadData();
-  assert.equal(JSON.parse(h.getTagsSignature()).length, 1);
-});
-
-test('quota failure during migration keeps local data and permits a later retry', async () => {
-  const h = createHarness();
-  const incident = `${prefix}incident:123`;
-  h.localData[incident] = { tagId: null };
-  h.rejectWrites('QUOTA_BYTES quota exceeded');
-  await h.init();
-  assert.equal(h.localData[incident].tagId, null);
-  assert.equal(h.localData['icm-sync-migration-v1'], undefined);
-  assert.equal(h.data[incident], undefined);
-  assert.equal(h.errors.length, 1);
-  assert.equal(h.alerts.length, 1);
-  assert.equal(h.intervals.length, 0);
-  h.allowWrites();
-  await h.init();
-  assert.equal(h.localData['icm-sync-migration-v1'], true);
-  assert.equal(h.data[incident].tagId, null);
-});
-
-test('only sync changes refresh displayed records after migration', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  const fixture = h.addGrid();
-  await h.init();
-  const incident = `${prefix}incident:123`;
-  h.data[incident] = { tagId: 'one' };
-  await h.storageChanged(incident, 'local');
-  assert.equal(fixture.select.value, '');
-  await h.storageChanged(incident, 'sync');
-  assert.equal(fixture.select.value, 'one');
-});
-
-test('Tag creation, renaming, coloring and deletion persist only to sync storage', async () => {
-  const h = createHarness();
-  await h.init();
-  const tag = { id: 'one', name: 'One', color: '#E6194B' };
-  await h.saveTag(tag);
-  await h.saveTagName('one', 'Renamed');
-  await h.saveTagColor('one', '#3CB44B');
-  assert.equal(h.data[`${prefix}tag:one:name`].value, 'Renamed');
-  assert.equal(h.data[`${prefix}tag:one:color`].value, '#3CB44B');
-  assert.equal(h.localData[`${prefix}tag:one:meta`], undefined);
-  await h.deleteTag('one');
-  assert.ok(h.data[`${prefix}tag:one:meta`].deletedAt);
-  assert.equal(h.data[`${prefix}tag:one:name`], undefined);
-  assert.equal(h.data[`${prefix}tag:one:color`], undefined);
-  assert.equal(h.getTagsSignature(), '[]');
-});
-
-test('failed Tag edits notify, retain stored values and recover for subsequent writes', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  await h.init();
-  h.rejectWrites('MAX_WRITE_OPERATIONS_PER_MINUTE quota exceeded');
-  assert.equal(await h.changeTag(() => h.saveTagName('one', 'Failed')), false);
-  assert.equal(await h.changeTag(() => h.saveTagColor('one', '#3CB44B')), false);
-  assert.equal(await h.changeTag(() => h.deleteTag('one')), false);
-  assert.equal(await h.changeTag(() => h.saveTag({ id: 'two', name: 'Two', color: '#3CB44B' })), false);
-  assert.equal(h.errors.length, 4);
-  assert.equal(h.alerts.length, 4);
-  assert.equal(h.data[`${prefix}tag:one:name`].value, 'One');
-  assert.equal(h.data[`${prefix}tag:one:color`].value, '#E6194B');
-  assert.equal(h.data[`${prefix}tag:one:meta`].deletedAt, undefined);
-  assert.equal(h.data[`${prefix}tag:two:meta`], undefined);
-  h.allowWrites();
-  assert.equal(await h.changeTag(() => h.saveTagName('one', 'Recovered')), true);
-  assert.equal(h.data[`${prefix}tag:one:name`].value, 'Recovered');
-});
-
-test('sync read errors are reported without clearing visible Tags', async () => {
-  const h = createHarness();
-  h.setTag('one', 'One', '#E6194B');
-  h.data[`${prefix}incident:123`] = { tagId: 'one' };
-  const fixture = h.addGrid();
-  await h.init();
-  h.rejectReads();
-  await h.storageChanged(`${prefix}incident:123`);
-  assert.equal(fixture.select.value, 'one');
-  assert.equal(h.errors.length, 1);
-  assert.equal(h.alerts.length, 1);
+test('dashboard tracks incidents, edits notes, filters incomplete work and removes rows without deleting notes', async t => {
+  const runtime = createRuntime(); const page = loadPage(runtime, { dashboard: true }); t.after(page.close); const d = page.document;
+  await waitFor(() => d.querySelector('#reports').options.length);
+  d.querySelector('#add-id').value = '123'; d.querySelector('#add-form').dispatchEvent(new page.window.Event('submit', { bubbles: true, cancelable: true }));
+  await waitFor(() => d.querySelector('#incidents tr'));
+  click(d.querySelector('[aria-label="Edit notes for incident 123"]'));
+  set(d, 'rootCause', 'Capacity'); set(d, 'resolution', 'Increased allocation'); set(d, 'notes', 'Verified recovery'); submit(d);
+  await waitFor(() => !d.querySelector('.ico-editor'));
+  assert.equal(d.querySelector('#root-count').textContent, '0');
+  d.querySelector('#filter').value = 'incomplete'; d.querySelector('#filter').dispatchEvent(new page.window.Event('change'));
+  assert.equal(d.querySelectorAll('#incidents tr').length, 0);
+  d.querySelector('#filter').value = 'all'; d.querySelector('#filter').dispatchEvent(new page.window.Event('change'));
+  click(d.querySelector('[aria-label="Untrack incident 123"]'));
+  await waitFor(() => !d.querySelector('#incidents tr'));
+  assert.equal(M.currentReport(await runtime.request('get')).entries['123'].notes, 'Verified recovery');
 });

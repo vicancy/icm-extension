@@ -1,0 +1,75 @@
+* { box-sizing: border-box; }
+body.workspace { margin: 0; background: #f5f7fa; color: #172b4d; font: 14px/1.5 "Segoe UI", Arial, sans-serif; }
+.workspace-header { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 34px 40px 30px; background: #fff; border-bottom: 1px solid #dfe5ec; }
+.eyebrow { margin: 0 0 8px; color: #5c6e86; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
+h1 { margin: 0; font-size: 30px; line-height: 1.25; letter-spacing: -.7px; font-weight: 650; }
+.subtitle { margin: 8px 0 0; color: #6b7b90; }
+.workspace-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.workspace-export { width: 660px; max-width: 100%; }
+.copy-range { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.copy-range label { font-size: 12px; font-weight: 600; }
+#copy-after { flex: 1; min-width: 200px; width: 100%; }
+.copy-help { margin: 6px 0 10px; font-size: 12px; color: #5c6e86; }
+#copy-range-status { margin-bottom: 0; min-height: 18px; }
+#copy-range-status.ico-error { color: #a4262c; }
+.workspace main { max-width: 1800px; margin: auto; padding: 26px 40px; }
+.report-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+.report-picker { display: flex; flex-direction: column; min-width: 260px; }
+.report-picker .eyebrow { margin-bottom: 5px; }
+.report-picker select { font-size: 16px; font-weight: 600; }
+.workspace input, .workspace select { padding: 9px 11px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #172b4d; font: inherit; }
+.report-bar .muted { flex: 1; min-width: 180px; }
+.muted { color: #718198; }
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+.backup-panel { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: center; padding: 14px 18px; margin-bottom: 20px; border: 1px solid #dfe5ec; border-radius: 8px; background: #fff; font-size: 12px; }
+.backup-panel p { margin: 4px 0 0; color: #5c6e86; }
+.backup-panel[data-state="saved"] strong { color: #237044; }
+.backup-panel[data-state="error"] strong, .backup-panel[data-state="offline"] strong, .backup-panel[data-state="conflict"] strong, .backup-panel[data-state="not-installed"] strong { color: #9a4c10; }
+.backup-info { flex: 1; min-width: 260px; }
+.backup-file { margin-top: 12px; }
+.backup-file-label { display: block; margin-bottom: 5px; font-size: 11px; font-weight: 650; color: #33465e; }
+.backup-file-location { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.backup-path { display: block; padding: 8px 10px; border: 1px solid #dfe5ec; border-radius: 5px; background: #f5f7fa; color: #253b57; font: 12px/1.6 Consolas, monospace; overflow-wrap: anywhere; user-select: all; }
+.backup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.backup-actions [hidden] { display: none; }
+.metrics > div { background: #fff; border: 1px solid #dfe5ec; border-radius: 9px; padding: 20px 24px; display: flex; flex-direction: column; gap: 4px; }
+.metrics strong { font-size: 28px; font-weight: 600; line-height: 1.2; }
+.metrics span { font-size: 12px; color: #66778e; }
+.incident-workspace { border: 1px solid #dfe5ec; border-radius: 9px; background: #fff; overflow: hidden; }
+.list-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 18px; border-bottom: 1px solid #e8edf2; }
+#search { flex: 1; min-width: 220px; }
+#add-form { display: flex; gap: 6px; margin: 0; }
+#add-id { width: 210px; }
+.page-status { min-height: 28px; padding: 7px 18px; font-size: 12px; color: #6b7b90; }
+.table-scroll { overflow: auto; }
+.incident-table { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 1100px; }
+.incident-table th { background: #f8fafc; text-align: left; padding: 12px 16px; border-bottom: 1px solid #dfe5ec; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #5b6b80; font-weight: 650; }
+.incident-table td { vertical-align: top; padding: 18px 16px; border-bottom: 1px solid #e8edf2; line-height: 1.55; overflow-wrap: anywhere; font-size: 12px; }
+.incident-table tr:last-child td { border-bottom: 0; }
+.incident-table th:first-child { width: 24%; }
+.incident-table th:nth-child(2) { width: 12%; }
+.incident-table th:nth-child(6) { width: 11%; }
+.incident-table th:last-child { width: 110px; }
+.incident-id { display: inline-block; margin-bottom: 6px; text-decoration: none; font-weight: 650; color: #165dbe; }
+.incident-title > div { color: #33465e; }
+.related-incident-links { margin-top: 8px; font-size: 11px; }
+.related-incident-links a { color: #185abe; text-decoration: none; margin-right: 4px; }
+.severity { display: inline-block; padding: 2px 6px; border-radius: 4px; background: #edf2f8; font-size: 11px; font-weight: 600; }
+.state-label { margin-top: 6px; color: #51667f; }
+.summary-text { white-space: pre-wrap; }
+.missing { color: #8a97a8; font-style: italic; }
+.row-buttons .ico-button { display: block; width: 100%; margin-bottom: 6px; padding: 5px; font-size: 11px; }
+.empty-state { text-align: center; padding: 48px 20px 60px; color: #6b7b90; }
+.empty-state[hidden] { display: none; }
+.empty-state h2 { font-size: 18px; color: #33465e; font-weight: 600; }
+.empty-icon { font-size: 34px; color: #7594ba; }
+.workspace-footer { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; margin-top: 18px; color: #77869a; font-size: 11px; }
+.workspace-footer p { margin: 0; line-height: 1.7; }
+.workspace-footer > div { display: flex; gap: 8px; flex-shrink: 0; }
+.workspace-footer .ico-button { background: transparent; font-size: 11px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+.ignored-table { min-width: 650px; }
+.ignored-table th:first-child { width: auto; }
+.ignored-table th:nth-child(2) { width: 210px; }
+.ignored-table th:last-child { width: 150px; }
+@media (max-width: 900px) { .workspace-header { align-items: flex-start; flex-direction: column; padding: 24px; } .workspace main { padding: 20px; } .metrics { grid-template-columns: repeat(2, 1fr); } .workspace-footer { flex-direction: column; } }

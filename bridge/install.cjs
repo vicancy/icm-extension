@@ -1,0 +1,16 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { configPath, defaultBackupPath, readConfig } = require('./config.cjs');
+const { installStartup } = require('./startup.cjs');
+const file = configPath();
+const extensionRoot = path.resolve(__dirname, '..');
+const previous = fs.existsSync(file) ? readConfig() : {};
+const token = previous.token || crypto.randomBytes(32).toString('hex');
+const backupPath = previous.backupPath || defaultBackupPath();
+const startupPath = installStartup();
+fs.mkdirSync(path.dirname(file), { recursive: true });
+fs.writeFileSync(file, JSON.stringify({ ...previous, port: 4176, token, extensionRoot, backupPath }, null, 2), { mode: 0o600 });
+const config = { url: 'ws://127.0.0.1:4176/extension', token };
+fs.writeFileSync(path.join(extensionRoot, 'bridge-config.js'), `// Generated locally; do not commit.\nglobalThis.IcmBridgeConfig = ${JSON.stringify(config)};\n`, { mode: 0o600 });
+console.log(JSON.stringify({ installed: true, backupPath, startupPath, next: 'Restart the local bridge if it is running, run node bridge/cli.cjs status, then reload this unpacked extension in Edge once.' }, null, 2));

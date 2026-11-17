@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>On-call workspace</title>
+  <link rel="stylesheet" href="content.css"><link rel="stylesheet" href="dashboard.css">
+  <script src="model.js" defer></script><script src="client.js" defer></script><script src="ui.js" defer></script><script src="dashboard.js" defer></script>
+</head>
+<body class="workspace">
+  <header class="workspace-header">
+    <div><p class="eyebrow">ICM / ON-CALL</p><h1>On-call workspace</h1><p class="subtitle">Keep the context. Make the handoff easy.</p></div>
+    <div class="workspace-export">
+      <div class="copy-range"><label for="copy-after">Copy after ICM <span class="muted">(optional)</span></label><input id="copy-after" placeholder="Last copied ICM ID or URL" aria-describedby="copy-range-help copy-range-status" autocomplete="off"></div>
+      <p id="copy-range-help" class="copy-help">Copy incidents added to this report after this ICM, excluding it. Leave blank for all.</p>
+      <div class="workspace-actions"><button id="copy" class="ico-button ico-primary">Copy table for OneNote</button><button id="copy-without-headers" class="ico-button" title="Copy data rows only, without column headers or the report title">Copy without headers</button><button id="html" class="ico-button">Download HTML</button><button id="csv" class="ico-button">CSV</button></div>
+      <p id="copy-range-status" class="copy-help" role="status"></p>
+    </div>
+  </header>
+  <main>
+    <section class="report-bar" aria-label="Current report">
+      <label class="report-picker"><span class="eyebrow">CURRENT REPORT</span><select id="reports" aria-label="Current report"></select></label>
+      <span id="period" class="muted"></span><button id="settings" class="ico-button">Report settings</button><button id="new-report" class="ico-button">+ New report</button>
+      <button id="ignored" class="ico-button">Ignored incidents</button>
+      <button id="agent-status" class="ico-button" title="Check the local agent connection">Agent: checking…</button>
+    </section>
+    <section class="backup-panel" aria-label="Automatic backup">
+      <div class="backup-info"><strong id="auto-backup-status" role="status">Automatic backup: checking…</strong><p id="auto-backup-detail"></p>
+        <div class="backup-file"><span class="backup-file-label">Backup file</span><div class="backup-file-location"><code id="auto-backup-path" class="backup-path">Waiting for the backup service…</code><button id="copy-backup-path" class="ico-button" disabled>Copy path</button></div></div>
+      </div>
+      <div class="backup-actions"><button id="backup-now" class="ico-button">Back up now</button><button id="restore-backup" class="ico-button" hidden>Restore saved backup</button></div>
+    </section>
+    <section class="metrics" aria-label="Report progress">
+      <div><strong id="tracked-count">0</strong><span>Tracked incidents</span></div><div><strong id="group-count">0</strong><span>Summary rows</span></div>
+      <div><strong id="root-count">0</strong><span>Need a root cause</span></div><div><strong id="resolution-count">0</strong><span>Need a resolution</span></div>
+    </section>
+    <section class="incident-workspace" aria-label="Tracked incidents">
+      <div class="list-toolbar">
+        <input id="search" type="search" placeholder="Search incidents, root causes or notes…" aria-label="Search tracked incidents">
+        <select id="filter" aria-label="Filter incidents"><option value="all">All tracked incidents</option><option value="incomplete">Needs summary</option></select>
+        <form id="add-form"><input id="add-id" placeholder="Incident ID or ICM URL" aria-label="Incident ID or ICM URL" required><button class="ico-button" type="submit">+ Track</button></form>
+      </div>
+      <div id="status" class="page-status" role="status">Loading your workspace…</div>
+      <div class="table-scroll"><table class="incident-table"><thead><tr><th>Incident</th><th>Severity / status</th><th>Root cause</th><th>Resolution</th><th>Notes</th><th>Summary group</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="incidents"></tbody></table></div>
+      <div id="empty" class="empty-state" hidden><span class="empty-icon">☆</span><h2>No tracked incidents yet</h2><p>Click Track beside an incident in ICM, or paste its ID above.<br>Record the root cause and resolution as you work.</p></div>
+    </section>
+    <footer class="workspace-footer"><p>Stored in this Edge profile. Notes never change official ICM fields.<br>ICM title, severity and status are snapshots from pages you visit. HTML/CSV downloads include all tracked incidents; Copy uses the optional starting ICM.</p><div><button id="backup" class="ico-button">Export backup</button><button id="import" class="ico-button">Import backup</button><input id="import-file" type="file" accept=".json,application/json" hidden></div></footer>
+  </main>
+</body>
+</html>

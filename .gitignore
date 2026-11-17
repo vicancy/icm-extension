@@ -1,0 +1,4 @@
+node_modules/
+test/screenshots/
+bridge-config.js
+oncall-workspace-backup*.json

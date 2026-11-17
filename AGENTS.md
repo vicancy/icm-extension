@@ -1,0 +1,12 @@
+# Working on ICM On-call Workspace
+
+- Keep the UI and saved handoff summaries in English.
+- Keep the OneNote/HTML/CSV export columns in this exact order: Day, RP/Runtime, Reported by customer, Severity, Status, # of customers impacted, # of occurrence, Root cause, Bug and/or ICM to external team, Error msg, Notes. Include saved Resolution content in Notes rather than adding a separate exported column.
+- Day is the ICM incident creation date, formatted YYYY-MM-DD in the page's displayed timezone. The Fluent list maps Created Time to data-automation-key="CreatedDate". The native Duration card uses an h3 labelled "Incident created" followed by an h3 containing time; "Source created", "Impact start", alert EventDate, comments and tracking dates are different. Do not automatically open incident pages or date cards to fill missing dates.
+- The Bug column contains each main incident's title linked to its ICM URL, followed by its linked incidents on separate lines using only clickable incident numbers. Put a concise conclusion in rootCause, analysis and evidence links in notes, and actual log exceptions/error messages in errorMessage. Leave unknown/unestablished values blank, including customer reporting and impact counts. Legacy relatedLinks belong in exported Notes, never in the Bug column. Preserve uncertainty and evidence details in Notes rather than overstating a root cause.
+- Use ICM's native Quick view for incident details. Do not reintroduce hover previews or automatically load incident pages on hover/focus. The explicit Quick Mitigate action is separate from previewing.
+- Preserve existing local edits. Notes, root cause, resolution and dashboard metadata are local annotations; do not write them to official IcM fields.
+- To record a user-authorized case directly in the installed dashboard, use the local API described in [bridge/README.md](bridge/README.md). Run `node bridge/cli.cjs call list_reports`, select the active report, read the case and save through `save_incident`. Do not ask the user to import a backup when this API is connected.
+- Preserve manual note content and use field-level `base` values when updating an existing field. Treat API timeout/disconnect as an unconfirmed outcome and read back before retrying.
+- Do not print or commit the generated bridge token/config, signed credential URLs, secret values or tokens in incident notes.
+- Official Quick Mitigate remains a separate feature and requires explicit user authorization. The local notes API does not expose it.
