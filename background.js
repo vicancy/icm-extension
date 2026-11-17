@@ -38,6 +38,153 @@ async function database() {
   return db;
 }
 
+function applySave(db, message) {
+  const report = M.currentReport(db, message.reportId);
+  M.emptyEntry(message.incidentId);
+  const previous = report.entries[message.incidentId] || M.emptyEntry(message.incidentId);
+  const next = M.patchEntry(previous, message.patch, message.base || {});
+  const ignored = M.isIgnored(db, next.id);
+  if (message.patch.tracked === true) {
+    if (previous.summaryIncidentId) throw new Error(`This incident is linked to #${previous.summaryIncidentId}. Unlink it before tracking it separately, or save notes with tracked: false.`);
+    if (message.baseIgnored !== undefined && message.baseIgnored !== ignored) throw new Error('Ignore changed in another window. Reopen this incident and try again.');
+    if (ignored && !message.restoreIgnored) throw new Error('This incident is ignored. Restore it or choose Track in Ignored incidents first.');
+    if (ignored) db.ignoredIncidents[next.id] = { ...db.ignoredIncidents[next.id], ignored: false, updatedAt: Date.now() };
+  }
+  if (next.tracked && !previous.tracked) next.trackedAt = Date.now();
+  next.updatedAt = Date.now();
+  report.entries[next.id] = next;
+  report.updatedAt = Date.now();
+}
+
+function applyLinks(db, message) {
+  const report = M.currentReport(db, message.reportId);
+  const related = M.relatedIndex(report);
+  const targetId = message.targetId;
+  if (typeof targetId !== 'string') throw new Error('Choose a tracked incident.');
+  if (targetId) {
+    M.emptyEntry(targetId);
+    const target = report.entries[targetId];
+    if (!target?.tracked || target.summaryIncidentId || M.isIgnored(db, targetId)) throw new Error('The selected summary is no longer tracked. Reopen Link and choose a tracked incident.');
+  }
+  if (!Array.isArray(message.incidents) || !message.incidents.length || message.incidents.length > 200) throw new Error('Choose between 1 and 200 incidents.');
+  const updates = new Map();
+  for (const source of message.incidents) {
+    M.emptyEntry(source?.id);
+    if (source.id === targetId) throw new Error('An incident cannot link to itself.');
+    const previous = report.entries[source.id] || M.emptyEntry(source.id);
+    const currentTarget = previous.summaryIncidentId || '';
+    const expected = message.baseTargets?.[source.id];
+    if (typeof expected !== 'string' || (currentTarget !== expected && currentTarget !== targetId)) throw new Error('The related incident changed in another window. Reopen it and try again.');
+    if (targetId && (typeof message.baseTracked?.[source.id] !== 'boolean'
+      || (previous.tracked !== message.baseTracked[source.id] && currentTarget !== targetId))) throw new Error('Tracking changed in another window. Reopen Link and try again.');
+    if (targetId && related.has(source.id)) throw new Error('Unlink this incident\'s related ICMs before linking it to another summary.');
+    const ignored = M.isIgnored(db, source.id);
+    if (targetId && (typeof message.baseIgnored?.[source.id] !== 'boolean' || message.baseIgnored[source.id] !== ignored)) throw new Error('Ignore changed in another window. Reopen Link and try again.');
+    const patch = {};
+    // Capture only visible metadata; keep each incident's existing private notes.
+    for (const key of M.METADATA_FIELDS) {
+      if (!previous[key] && typeof source[key] === 'string' && source[key].trim()) patch[key] = source[key];
+    }
+    const next = M.patchEntry(previous, patch);
+    if (targetId) { next.summaryIncidentId = targetId; next.tracked = false; }
+    else delete next.summaryIncidentId;
+    next.updatedAt = Date.now();
+    updates.set(source.id, next);
+  }
+  if (targetId) {
+    // Append from the latest saved records inside the serialized operation.
+    // Deduplicate IDs via updates, and do not append again on a link retry.
+    const additions = [...updates.keys()]
+      .filter(id => report.entries[id]?.summaryIncidentId !== targetId)
+      .map(id => M.knownText(report.entries[id]?.notes))
+      .filter(notes => notes.trim());
+    if (additions.length) {
+      const target = report.entries[targetId];
+      const notes = [M.knownText(target.notes), ...additions].filter(value => value.trim()).join('\n');
+      const next = M.patchEntry(target, { notes }, { notes: target.notes ?? '' });
+      updates.set(targetId, { ...next, updatedAt: Date.now() });
+    }
+  }
+  for (const [id, entry] of updates) {
+    report.entries[id] = entry;
+    if (targetId && M.isIgnored(db, id)) db.ignoredIncidents[id] = { ...db.ignoredIncidents[id], ignored: false, updatedAt: Date.now() };
+  }
+  report.updatedAt = Date.now();
+}
+
+function applyObservations(db, message) {
+  const report = M.currentReport(db, message.reportId);
+  const displayedReport = M.reportForDisplay(db, report.id);
+  let changed = false;
+  for (const snapshot of (message.snapshots || []).slice(0, 500)) {
+    const entry = report.entries[snapshot.id];
+    if (!(entry?.tracked || M.linkedSummary(displayedReport, snapshot.id)) || M.isIgnored(db, snapshot.id)) continue;
+    const patch = {};
+    const base = message.base?.[snapshot.id] || {};
+    for (const key of M.METADATA_FIELDS) {
+      if (key === 'day' && M.createdDay(snapshot.day) !== snapshot.day) continue;
+      // An observation may have waited behind a save from another tab.
+      if (Object.prototype.hasOwnProperty.call(base, key) && (entry[key] ?? '') !== base[key]) continue;
+      if (typeof snapshot[key] === 'string' && snapshot[key].trim() && snapshot[key].trim() !== entry[key]) patch[key] = snapshot[key];
+    }
+    if (!Object.keys(patch).length) continue;
+    report.entries[entry.id] = { ...M.patchEntry(entry, patch), observedAt: Date.now() };
+    changed = true;
+  }
+  return changed;
+}
+
+function applyIgnore(db, message) {
+  const batch = message.type === 'oncall:ignore-incidents';
+  const incidents = batch ? message.incidents : [{ id: message.incidentId, title: message.title }];
+  if (!Array.isArray(incidents) || !incidents.length || incidents.length > 200) throw new Error('Choose between 1 and 200 incidents.');
+  if (typeof message.ignored !== 'boolean') throw new Error('Choose Ignore or Restore.');
+  const report = M.currentReport(db, message.reportId);
+  const updates = new Map();
+  for (const source of incidents) {
+    M.emptyEntry(source?.id);
+    const entry = report.entries[source.id];
+    if (batch && (message.baseIgnored?.[source.id] !== M.isIgnored(db, source.id)
+      || message.baseTracked?.[source.id] !== !!entry?.tracked
+      || message.baseTargets?.[source.id] !== (entry?.summaryIncidentId || ''))) {
+      throw new Error('An incident changed in another window. Review the selection and try again.');
+    }
+    const title = source.title ?? entry?.title ?? db.ignoredIncidents?.[source.id]?.title ?? '';
+    M.patchEntry(M.emptyEntry(source.id), { title });
+    updates.set(source.id, title.trim());
+  }
+  db.ignoredIncidents ||= {};
+  for (const [id, title] of updates) {
+    const previous = db.ignoredIncidents[id];
+    // Validate the entire batch before making the single storage write.
+    // Keep restored records so old backups cannot undo later decisions.
+    db.ignoredIncidents[id] = { id, title, ignored: message.ignored,
+      ignoredAt: message.ignored ? Date.now() : previous?.ignoredAt || 0, updatedAt: Date.now() };
+    const entry = report.entries[id];
+    if (entry?.tracked) {
+      report.entries[id] = { ...entry, tracked: false, updatedAt: Date.now() };
+      report.updatedAt = Date.now();
+    }
+  }
+}
+
+function applyImport(db, imported, restoring) {
+  if (restoring && (!M.validWorkspaceId(imported.workspaceId) || !imported.reports.length)) throw new Error('No valid automatic backup is available.');
+  const knownIds = new Set([...Object.keys(db.ignoredIncidents || {}), ...db.reports.flatMap(report => Object.keys(report.entries))]);
+  db.ignoredIncidents ||= {};
+  for (const [id, entry] of Object.entries(imported.ignoredIncidents)) if (!knownIds.has(id)) db.ignoredIncidents[id] = entry;
+  // Import as new reports; existing records are never overwritten.
+  for (const report of imported.reports) {
+    const copy = { ...report, id: crypto.randomUUID(), name: `${report.name.slice(0, 149)} (imported)` };
+    db.reports.push(copy);
+    if (restoring && report.id === imported.activeReportId) db.activeReportId = copy.id;
+  }
+  if (restoring) {
+    db.workspaceId = imported.workspaceId;
+    if (imported.listPreferences) db.listPreferences = { ...imported.listPreferences, ...db.listPreferences };
+  }
+}
+
 async function handle(message) {
   if (message.type === 'oncall:bridge-status') {
     agentBridge?.connect();
@@ -64,114 +211,20 @@ async function handle(message) {
   } else if (message.type === 'oncall:edit-report') {
     Object.assign(M.currentReport(db, message.reportId), M.reportFields(message.fields), { updatedAt: Date.now() });
   } else if (message.type === 'oncall:save') {
-    const report = M.currentReport(db, message.reportId);
-    M.emptyEntry(message.incidentId);
-    const previous = report.entries[message.incidentId] || M.emptyEntry(message.incidentId);
-    const next = M.patchEntry(previous, message.patch, message.base || {});
-    const ignored = M.isIgnored(db, next.id);
-    if (message.patch.tracked === true) {
-      if (previous.summaryIncidentId) throw new Error(`This incident is linked to #${previous.summaryIncidentId}. Unlink it before tracking it separately, or save notes with tracked: false.`);
-      if (message.baseIgnored !== undefined && message.baseIgnored !== ignored) throw new Error('Ignore changed in another window. Reopen this incident and try again.');
-      if (ignored && !message.restoreIgnored) throw new Error('This incident is ignored. Restore it or choose Track in Ignored incidents first.');
-      if (ignored) db.ignoredIncidents[next.id] = { ...db.ignoredIncidents[next.id], ignored: false, updatedAt: Date.now() };
-    }
-    if (next.tracked && !previous.tracked) next.trackedAt = Date.now();
-    next.updatedAt = Date.now();
-    report.entries[next.id] = next;
-    report.updatedAt = Date.now();
+    applySave(db, message);
   } else if (message.type === 'oncall:link-incidents') {
-    const report = M.currentReport(db, message.reportId);
-    const targetId = message.targetId;
-    if (typeof targetId !== 'string') throw new Error('Choose a tracked incident.');
-    if (targetId) {
-      M.emptyEntry(targetId);
-      const target = report.entries[targetId];
-      if (!target?.tracked || target.summaryIncidentId || M.isIgnored(db, targetId)) throw new Error('The selected summary is no longer tracked. Reopen Link and choose a tracked incident.');
-    }
-    if (!Array.isArray(message.incidents) || !message.incidents.length || message.incidents.length > 200) throw new Error('Choose between 1 and 200 incidents.');
-    const updates = new Map();
-    for (const source of message.incidents) {
-      M.emptyEntry(source?.id);
-      if (source.id === targetId) throw new Error('An incident cannot link to itself.');
-      const previous = report.entries[source.id] || M.emptyEntry(source.id);
-      const currentTarget = previous.summaryIncidentId || '';
-      const expected = message.baseTargets?.[source.id];
-      if (typeof expected !== 'string' || (currentTarget !== expected && currentTarget !== targetId)) throw new Error('The related incident changed in another window. Reopen it and try again.');
-      if (targetId && (typeof message.baseTracked?.[source.id] !== 'boolean'
-        || (previous.tracked !== message.baseTracked[source.id] && currentTarget !== targetId))) throw new Error('Tracking changed in another window. Reopen Link and try again.');
-      if (targetId && M.relatedEntries(report, source.id).length) throw new Error('Unlink this incident\'s related ICMs before linking it to another summary.');
-      const ignored = M.isIgnored(db, source.id);
-      if (targetId && (typeof message.baseIgnored?.[source.id] !== 'boolean' || message.baseIgnored[source.id] !== ignored)) throw new Error('Ignore changed in another window. Reopen Link and try again.');
-      const patch = {};
-      // Capture only visible metadata; keep each incident's existing private notes.
-      for (const key of ['title', 'severity', 'status', 'day']) {
-        if (!previous[key] && typeof source[key] === 'string' && source[key].trim()) patch[key] = source[key];
-      }
-      const next = M.patchEntry(previous, patch);
-      if (targetId) { next.summaryIncidentId = targetId; next.tracked = false; }
-      else delete next.summaryIncidentId;
-      next.updatedAt = Date.now();
-      updates.set(source.id, next);
-    }
-    for (const [id, entry] of updates) {
-      report.entries[id] = entry;
-      if (targetId && M.isIgnored(db, id)) db.ignoredIncidents[id] = { ...db.ignoredIncidents[id], ignored: false, updatedAt: Date.now() };
-    }
-    report.updatedAt = Date.now();
+    applyLinks(db, message);
   } else if (message.type === 'oncall:observe') {
-    const report = M.currentReport(db, message.reportId);
-    let changed = false;
-    for (const snapshot of (message.snapshots || []).slice(0, 500)) {
-      const entry = report.entries[snapshot.id];
-      if (!(entry?.tracked || M.linkedSummary(M.reportForDisplay(db, report.id), snapshot.id)) || M.isIgnored(db, snapshot.id)) continue;
-      const patch = {};
-      for (const key of ['title', 'severity', 'status', 'day']) {
-        if (key === 'day' && M.createdDay(snapshot.day) !== snapshot.day) continue;
-        if (typeof snapshot[key] === 'string' && snapshot[key].trim() && snapshot[key].trim() !== entry[key]) patch[key] = snapshot[key];
-      }
-      if (!Object.keys(patch).length) continue;
-      report.entries[entry.id] = { ...M.patchEntry(entry, patch), observedAt: Date.now() };
-      changed = true;
-    }
-    if (!changed) return db;
-  } else if (message.type === 'oncall:ignore') {
-    M.emptyEntry(message.incidentId);
-    if (typeof message.ignored !== 'boolean') throw new Error('Choose Ignore or Restore.');
-    const report = M.currentReport(db, message.reportId);
-    const entry = report.entries[message.incidentId];
-    const title = message.title ?? entry?.title ?? db.ignoredIncidents?.[message.incidentId]?.title ?? '';
-    M.patchEntry(M.emptyEntry(message.incidentId), { title });
-    db.ignoredIncidents ||= {};
-    const previous = db.ignoredIncidents[message.incidentId];
-    // Keep an explicit restored record so importing an old backup cannot undo it.
-    db.ignoredIncidents[message.incidentId] = { id: message.incidentId, title: title.trim(), ignored: message.ignored,
-      ignoredAt: message.ignored ? Date.now() : previous?.ignoredAt || 0, updatedAt: Date.now() };
-    if (entry?.tracked) {
-      report.entries[entry.id] = { ...entry, tracked: false, updatedAt: Date.now() };
-      report.updatedAt = Date.now();
-    }
+    if (!applyObservations(db, message)) return db;
+  } else if (message.type === 'oncall:ignore' || message.type === 'oncall:ignore-incidents') {
+    applyIgnore(db, message);
   } else if (message.type === 'oncall:list-preferences') {
-    const patch = message.patch;
-    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.entries(patch).some(([key, value]) => !['showTracked', 'showIgnored'].includes(key) || typeof value !== 'boolean')) throw new Error('Invalid list visibility preference.');
-    db.listPreferences = { ...db.listPreferences, ...patch };
+    db.listPreferences = { ...db.listPreferences, ...M.listPreferences(message.patch) };
   } else if (message.type === 'oncall:import' || message.type === 'oncall:restore-backup') {
     const restoring = message.type === 'oncall:restore-backup';
     if (restoring && !agentBridge) throw new Error('The local backup service is not installed.');
     const imported = M.validateBackup(restoring ? await agentBridge.readBackup() : message.data);
-    if (restoring && (!M.validWorkspaceId(imported.workspaceId) || !imported.reports.length)) throw new Error('No valid automatic backup is available.');
-    const knownIds = new Set([...Object.keys(db.ignoredIncidents || {}), ...db.reports.flatMap(report => Object.keys(report.entries))]);
-    db.ignoredIncidents ||= {};
-    for (const [id, entry] of Object.entries(imported.ignoredIncidents)) if (!knownIds.has(id)) db.ignoredIncidents[id] = entry;
-    // Import as new reports; existing records are never overwritten.
-    for (const report of imported.reports) {
-      const copy = { ...report, id: crypto.randomUUID(), name: `${report.name.slice(0, 149)} (imported)` };
-      db.reports.push(copy);
-      if (restoring && report.id === imported.activeReportId) db.activeReportId = copy.id;
-    }
-    if (restoring) {
-      db.workspaceId = imported.workspaceId;
-      if (imported.listPreferences) db.listPreferences = { ...imported.listPreferences, ...db.listPreferences };
-    }
+    applyImport(db, imported, restoring);
   } else {
     throw new Error('Unknown workspace action.');
   }

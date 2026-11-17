@@ -58,7 +58,7 @@ For handoff fields, set `day` only from the actual ICM incident creation date (`
 
 `read_incident` also returns `ignored`. An ignored incident cannot be implicitly retracked by `save_incident`. To save authorized notes while keeping it ignored, explicitly include `"tracked": false` in `fields`; the user can Restore or Track it through **Ignored incidents**. Ignore/Restore and official mitigation are not exposed by this local notes API. `list_reports` counts exclude ignored incidents.
 
-`read_incident` returns `relatedIncidentIds` for a main summary and `entry.summaryIncidentId` for a related incident. Related incidents cannot be implicitly retracked by `save_incident`; use `"tracked": false` when saving their individual notes. The user manages links through **Link** / **Related ICMs** in the extension. Related IDs export as numeric links directly below the main incident title in **Bug and/or ICM to external team**, and their number does not establish an occurrence or customer-impact count.
+`read_incident` returns `relatedIncidentIds` for a main summary and `entry.summaryIncidentId` for a related incident. Related incidents cannot be implicitly retracked by `save_incident`; use `"tracked": false` when saving their individual notes. The user manages links through **Link** / **Related ICMs** in the extension. A new link appends the source's saved Notes to the target's latest Notes with a newline, preserving the source; subsequent source edits are not synchronized. Root cause and Resolution are not merged. Related IDs export as numeric links directly below the main incident title in **Bug and/or ICM to external team**, and their number does not establish an occurrence or customer-impact count.
 
 ## HTTP contract
 

@@ -76,7 +76,10 @@
   async function run(doc, id, options = {}) {
     const defaults = options.defaults || DEFAULTS;
     const step = options.onProgress || (() => {});
-    const check = () => assertIncident(doc, id, options.signal);
+    const check = () => {
+      assertIncident(doc, id, options.signal);
+      if (options.shouldContinue && !options.shouldContinue()) throw new Error('The page or report changed. Mitigation stopped.');
+    };
     const click = element => {
       check();
       if (!element?.isConnected || element.ownerDocument !== doc || !enabled(element)) throw new Error('ICM does not allow this action right now.');
@@ -146,22 +149,22 @@
     return { status, alreadyDone: false };
   }
 
-  let active;
+  let active, batch;
   const results = new Map();
   const listeners = new Set();
   const notify = () => listeners.forEach(fn => fn());
   function managedFrame() {
     try { return !!window.frameElement?.classList.contains('ico-mitigation-frame'); } catch { return false; }
   }
-  function start(id) {
-    if (active) throw new Error('Finish or close the current Quick Mitigate action first.');
+  function start(id, options = {}) {
+    if (active || (batch && options.batch !== batch)) throw new Error('Finish or close the current Quick Mitigate action first.');
     if (!/^\d{1,20}$/.test(id)) throw new Error('Invalid incident ID.');
     const UI = IcmOncallUI;
     const controller = new AbortController();
     const panel = UI.node('section', 'ico-mitigation'); panel.dataset.busy = 'true';
     panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', `Quick Mitigate incident ${id}`);
     const header = UI.node('div', 'ico-mitigation-header');
-    const title = UI.node('strong', '', `Mitigate incident ${id}`);
+    const title = UI.node('strong', '', options.label || `Mitigate incident ${id}`);
     const status = UI.node('span', 'ico-mitigation-status', 'Loading the ICM incident…'); status.setAttribute('role', 'status');
     const open = UI.node('a', 'ico-link', 'Open in ICM ↗'); open.href = IcmOncall.incidentUrl(id); open.target = '_blank'; open.rel = 'noopener noreferrer';
     const close = UI.button('Stop', 'ico-subtle');
@@ -200,12 +203,15 @@
             return null;
           }, { signal: controller.signal, timeoutMs: 30000 }, 'The ICM page could not load. Open it in ICM and try there.');
         }
-        const result = await run(targetDoc, id, { signal: controller.signal, onProgress(message, sent) { status.textContent = message; submitted ||= !!sent; close.textContent = submitted ? 'Close' : 'Stop'; } });
+        const result = await run(targetDoc, id, { signal: controller.signal, shouldContinue: options.shouldContinue, onProgress(message, sent) { status.textContent = message; submitted ||= !!sent; close.textContent = submitted ? 'Close' : 'Stop'; } });
         stop(result); UI.toast(`Incident ${id} is ${result.status.toLowerCase()}.`);
       } catch (error) {
         if (controller.signal.aborted) return;
         panel.dataset.busy = 'false'; panel.dataset.dirty = 'true';
         status.textContent = error.message; status.classList.add('ico-error'); close.textContent = 'Close';
+        // Stop the batch immediately, while leaving this native form available.
+        // A later manual completion must not resume the rest of the batch.
+        if (options.stopOnError) finish({ error: error.message });
         // Automation stops on validation errors. The user can complete the
         // visible official form; this watcher only observes its final status.
         timer = setInterval(() => {
@@ -220,5 +226,35 @@
     perform();
     return promise;
   }
-  globalThis.IcmQuickMitigate = { DEFAULTS, run, start, managedFrame, subscribe: fn => listeners.add(fn), result: id => results.get(id), clearResult: id => results.delete(id), active: () => active?.id };
+  async function startBatch(incidents, options = {}) {
+    if (active || batch) throw new Error('Finish or close the current Quick Mitigate action first.');
+    if (!Array.isArray(incidents) || !incidents.length || incidents.length > 200 || incidents.some(item => !/^\d{1,20}$/.test(item?.id))) throw new Error('Choose between 1 and 200 valid incidents.');
+    // Freeze the IDs at the click; selection changes never add work to this run.
+    const selected = [...new Map(incidents.map(item => [item.id, { id: item.id, status: item.status }])).values()];
+    const outcome = { completed: [], skipped: [], stoppedAt: '', error: '' };
+    const context = {}; batch = context; notify();
+    try {
+      for (const [index, item] of selected.entries()) {
+        if (options.shouldContinue && !options.shouldContinue()) { outcome.stoppedAt = item.id; outcome.error = 'The page or report changed. Mitigation stopped.'; break; }
+        if (CLOSED.has(results.get(item.id) || item.status)) { outcome.skipped.push(item.id); continue; }
+        let result;
+        try {
+          result = await (options.startIncident || start)(item.id, { batch: context, stopOnError: true,
+            shouldContinue: options.shouldContinue, label: `Mitigate ${index + 1} of ${selected.length} · #${item.id}` });
+        } catch (error) { result = { error: error.message }; }
+        if (!result || result.error || !CLOSED.has(result.status)) {
+          outcome.stoppedAt = item.id;
+          outcome.error = result?.error || (result ? 'ICM has not confirmed mitigation. Check the incident before trying again.' : 'Mitigation stopped.');
+          break;
+        }
+        (result.alreadyDone ? outcome.skipped : outcome.completed).push(item.id);
+        // Persist only confirmed status, and never retry an official submission
+        // when a local metadata save fails.
+        try { await options.onResult?.(item.id, result); }
+        catch (error) { outcome.stoppedAt = item.id; outcome.error = `ICM confirmed ${result.status}, but the local update failed: ${error.message}`; break; }
+      }
+      return outcome;
+    } finally { batch = null; notify(); }
+  }
+  globalThis.IcmQuickMitigate = { DEFAULTS, run, start, startBatch, managedFrame, busy: () => !!active || !!batch, subscribe: fn => listeners.add(fn), result: id => results.get(id), clearResult: id => results.delete(id), active: () => active?.id };
 })();

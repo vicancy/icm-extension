@@ -109,7 +109,7 @@ test('Ignored list searches, restores pending incidents, and explicitly tracks t
   assert.equal(M.isIgnored(result, '123'), false); assert.equal(hidden(list), true);
 });
 
-test('native selected rows stay visible, including native select-all, until deselected', async t => {
+test('filtered selections are cleared through native controls, with a visible fallback when a control is unavailable', async t => {
   const runtime = createRuntime(); const page = open(t, runtime);
   await waitFor(() => button(page, 'track'));
   click(button(page, 'track')); await waitFor(() => hidden(page));
@@ -117,8 +117,7 @@ test('native selected rows stay visible, including native select-all, until dese
   assert.match(page.document.querySelector('.ico-hidden-count').textContent, /1 selected kept visible/);
   row(page).setAttribute('aria-selected', 'false'); await waitFor(() => hidden(page));
   const checkbox = page.document.createElement('input'); checkbox.type = 'checkbox'; row(page).prepend(checkbox);
-  change(page, checkbox, true); await waitFor(() => !hidden(page));
-  change(page, checkbox, false); await waitFor(() => hidden(page));
+  change(page, checkbox, true); await waitFor(() => !checkbox.checked && hidden(page));
 });
 
 test('recycled and invalid rows lose obsolete hiding and bind Ignore to the new incident', async t => {

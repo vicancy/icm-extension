@@ -4,10 +4,11 @@
   const request = IcmOncallClient.request;
   const mitigate = IcmQuickMitigate;
   const ROWS = '.ms-DetailsRow[role="row"], .searchresults-k-grid .k-grid-content tr[role="row"]';
-  const METADATA_FIELDS = ['title', 'severity', 'status', 'day'];
+  const METADATA_FIELDS = M.METADATA_FIELDS;
   let db, toolbar, editor, timer;
-  let observing = false;
-  const observedSnapshots = new Map();
+  let observing = false, observationReadback = false, bulkBusy = false;
+  const observations = IcmObservations.create(M);
+  const deselectionAttempts = new WeakMap();
   let currentUrl = location.href;
   const report = () => M.currentReport(db);
 
@@ -42,19 +43,74 @@
     return { id, title: title && title !== 'IcM' && title !== id ? title : '', ...(status ? { status } : {}), ...(day ? { day } : {}) };
   }
   const metadata = snapshot => Object.fromEntries(METADATA_FIELDS.filter(key => snapshot[key]).map(key => [key, snapshot[key]]));
-  function filterRows() {
-    const isQuery = /\/incidents\/(?:queries|search)(?:\/|$)/i.test(location.pathname);
-    const displayedReport = M.reportForDisplay(db);
-    let hidden = 0, selected = 0;
+  const isQueryPage = () => /\/incidents\/(?:queries|search)(?:\/|$)/i.test(location.pathname);
+  const rowSelected = row => row.getAttribute('aria-selected') === 'true' || row.classList.contains('k-state-selected') || [...row.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"]')].some(item => !item.closest('.ico-row-actions'));
+  function listContext() {
+    const selectedReport = report();
+    return { report: selectedReport, displayedReport: M.reportForDisplay(db, selectedReport.id), isQuery: isQueryPage(),
+      rows: new Map([...document.querySelectorAll(ROWS)].map(row => [row, rowSnapshot(row)])) };
+  }
+  function rowFiltered(snapshot, context) {
+    if (!context.isQuery || !snapshot) return false;
+    const ignored = M.isIgnored(db, snapshot.id);
+    const tracked = !ignored && context.report.entries[snapshot.id]?.tracked;
+    const linked = M.linkedSummary(context.displayedReport, snapshot.id);
+    const mitigated = /^Mitigated$/i.test(mitigate.result(snapshot.id) || snapshot.status || '');
+    return !!((db.listPreferences?.hideMitigated && mitigated)
+      || (ignored ? !db.listPreferences?.showIgnored : (tracked || linked) && !db.listPreferences?.showTracked));
+  }
+  function selectionCheckbox(row) {
+    return [...row.querySelectorAll('[role="checkbox"][data-selection-toggle="true"], input[type="checkbox"], [role="checkbox"]')]
+      .find(item => !item.disabled && item.getAttribute('aria-disabled') !== 'true' && !item.closest('.ico-row-actions'));
+  }
+  function toggleSelection(checkbox) {
+    // Fluent remembers modifiers from mousedown. Clear Shift/Ctrl for each
+    // individual toggle so cleaning up a range cannot extend that range again.
+    checkbox.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+    checkbox.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
+    checkbox.click();
+  }
+  function selectedIncidents(context = listContext()) {
+    if (!context.isQuery) return [];
+    const selected = new Map();
+    for (const [row, snapshot] of context.rows) {
+      if (!rowSelected(row)) continue;
+      if (snapshot && !rowFiltered(snapshot, context)) selected.set(snapshot.id, { id: snapshot.id, ...metadata(snapshot), status: mitigate.result(snapshot.id) || snapshot.status });
+    }
+    return [...selected.values()];
+  }
+  function deselectIncidents(incidents) {
+    const ids = new Set(incidents.map(item => item.id));
     for (const row of document.querySelectorAll(ROWS)) {
-      const snapshot = rowSnapshot(row);
-      const ignored = snapshot && M.isIgnored(db, snapshot.id);
-      const tracked = snapshot && !ignored && report().entries[snapshot.id]?.tracked;
-      const linked = snapshot && M.linkedSummary(displayedReport, snapshot.id);
-      const shouldHide = isQuery && snapshot && (ignored ? !db.listPreferences?.showIgnored : (tracked || linked) && !db.listPreferences?.showTracked);
-      // Native bulk selection must never leave selected incidents invisible.
-      const isSelected = row.getAttribute('aria-selected') === 'true' || row.classList.contains('k-state-selected') || [...row.querySelectorAll('input[type="checkbox"]:checked, [role="checkbox"][aria-checked="true"]')].some(item => !item.closest('.ico-row-actions'));
-      const hide = !!shouldHide && !isSelected;
+      if (!ids.has(rowSnapshot(row)?.id) || !rowSelected(row)) continue;
+      // Let ICM update its selection model before filtering the row.
+      const checkbox = selectionCheckbox(row);
+      if (checkbox) toggleSelection(checkbox);
+    }
+  }
+  function filterRows(context = listContext()) {
+    const isQuery = context.isQuery;
+    let hidden = 0, selected = 0;
+    for (const [row, snapshot] of context.rows) {
+      const shouldHide = rowFiltered(snapshot, context);
+      if (shouldHide && rowSelected(row)) {
+        const checkbox = selectionCheckbox(row);
+        if (checkbox && deselectionAttempts.get(row)?.id !== snapshot.id) {
+          const attempt = { id: snapshot.id, settled: false };
+          deselectionAttempts.set(row, attempt);
+          // Update ICM's actual selection model, not just its ARIA attributes.
+          toggleSelection(checkbox);
+          requestAnimationFrame(() => {
+            if (deselectionAttempts.get(row) !== attempt) return;
+            attempt.settled = true; refreshControls();
+          });
+        }
+      } else deselectionAttempts.delete(row);
+      const isSelected = rowSelected(row);
+      const pending = deselectionAttempts.get(row)?.settled === false;
+      // If native deselection is unavailable, keep the selected row visible
+      // and block bulk actions rather than concealing an official target.
+      const hide = shouldHide && (!isSelected || pending);
       if (row.classList.contains('ico-row-hidden') !== hide) row.classList.toggle('ico-row-hidden', hide);
       if (hide) hidden++;
       else if (shouldHide && isSelected) selected++;
@@ -63,17 +119,61 @@
       toolbar.querySelector('.ico-list-filters').hidden = !isQuery;
       toolbar.querySelector('[name="showTracked"]').checked = !!db.listPreferences?.showTracked;
       toolbar.querySelector('[name="showIgnored"]').checked = !!db.listPreferences?.showIgnored;
-      toolbar.querySelector('.ico-hidden-count').textContent = `${hidden} hidden in loaded rows${selected ? ` · ${selected} selected kept visible` : ''}`;
+      toolbar.querySelector('[data-action="hide-mitigated"]').setAttribute('aria-pressed', String(!!db.listPreferences?.hideMitigated));
+      toolbar.querySelector('.ico-hidden-count').textContent = `${hidden} hidden${selected ? ` · ${selected} selected kept visible` : ''}`;
       toolbar.querySelector('[data-action="open-ignored"]').textContent = `Ignored (${M.ignoredEntries(db).length})`;
+      const selectedItems = selectedIncidents(context);
+      const bulk = toolbar.querySelector('.ico-bulk-actions');
+      bulk.hidden = !isQuery || (!selectedItems.length && !bulkBusy);
+      bulk.querySelector('.ico-selected-count').textContent = `${selectedItems.length} selected`;
+      for (const button of bulk.querySelectorAll('button')) button.disabled = !selectedItems.length || bulkBusy || mitigate.busy();
+      if (selectedItems.length && selectedItems.every(item => /^(Mitigated|Resolved)$/i.test(item.status || ''))) bulk.querySelector('[data-action="mitigate-selected"]').disabled = true;
     }
   }
-  function refreshControls() {
+  const SELECT_ALL = '.ms-DetailsHeader [role="checkbox"], .ms-DetailsHeader input[type="checkbox"], .searchresults-k-grid .k-grid-header input[type="checkbox"]';
+  function selectVisibleRows(event) {
+    if (!db || !isQueryPage()) return;
+    const target = event.target.closest?.('*');
+    if (!target || target.closest('.ico-toolbar, .ico-overlay, .ico-row-actions, .ico-mitigation')) return;
+    const header = target.closest(SELECT_ALL);
+    const shortcut = event.type === 'keydown' && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'a';
+    if (shortcut && target.closest('input, textarea, [role="textbox"], [contenteditable="true"], [contenteditable=""]')) return;
+    if (!shortcut && (!header || (event.type === 'keydown' && ![' ', 'Enter'].includes(event.key)))) return;
+    const scope = target.closest('.ms-DetailsList, .searchresults-k-grid, [role="grid"]');
+    if (!scope) return;
+    const context = listContext();
+    const rows = [...context.rows].filter(([row]) => scope.contains(row));
+    if (!rows.some(([, snapshot]) => rowFiltered(snapshot, context))) return;
+    const visible = rows.filter(([, snapshot]) => !rowFiltered(snapshot, context)).map(([row]) => row);
+    if (visible.some(row => !selectionCheckbox(row))) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    // The native header is mixed when only visible rows are selected. Base
+    // its next toggle on those rows so a second click still clears selection.
+    const select = shortcut || (visible.length > 0 && !visible.every(rowSelected));
+    for (const row of visible) if (rowSelected(row) !== select) toggleSelection(selectionCheckbox(row));
+    filterRows(context);
+  }
+  document.addEventListener('click', selectVisibleRows, true);
+  document.addEventListener('keydown', selectVisibleRows, true);
+  document.addEventListener('click', event => {
+    if (!db || !isQueryPage() || !event.target.closest?.('[role="menubar"][aria-label="Bulk actions"]')) return;
+    const context = listContext();
+    filterRows(context);
+    if ([...context.rows].some(([row, snapshot]) => rowFiltered(snapshot, context) && rowSelected(row))) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      UI.toast('Clear the filtered incidents from the selection before using this action.', true);
+    }
+  }, true);
+  function refreshControls(context) {
     if (!db) return;
+    context ||= listContext();
+    const related = M.relatedIndex(context.report);
     for (const controls of document.querySelectorAll('.ico-row-actions, .ico-detail-actions')) {
-      const snapshot = controls._snapshot?.();
+      const row = controls.closest(ROWS);
+      const snapshot = row ? context.rows.get(row) : controls._snapshot?.();
       if (!snapshot) { controls.hidden = true; continue; }
       controls.hidden = false;
-      const entry = report().entries[snapshot.id];
+      const entry = context.report.entries[snapshot.id];
       const ignored = M.isIgnored(db, snapshot.id);
       const tracked = !ignored && entry?.tracked;
       const linkedId = entry?.summaryIncidentId;
@@ -85,7 +185,7 @@
       track.disabled = !!linkedId;
       if (linkedId) track.title = `Unlink from #${linkedId} before tracking separately`;
       const link = controls.querySelector('[data-action="link"]');
-      const relatedCount = M.relatedEntries(report(), snapshot.id).length;
+      const relatedCount = related.get(snapshot.id)?.length || 0;
       link.textContent = linkedId ? `Linked #${linkedId}` : tracked || relatedCount ? `Related (${relatedCount})` : 'Link';
       link.title = tracked || relatedCount ? 'Manage related ICMs' : 'Link to a tracked incident';
       link.setAttribute('aria-label', linkedId ? `Change summary link for incident ${snapshot.id}` : tracked || relatedCount ? `Related ICMs for incident ${snapshot.id}` : `Link incident ${snapshot.id} to a tracked incident`);
@@ -101,12 +201,70 @@
         const status = mitigate.result(snapshot.id) || snapshot.status;
         const done = /^(Mitigated|Resolved)$/i.test(status || '');
         quick.textContent = mitigate.active() === snapshot.id ? 'Mitigating…' : done ? status : 'Mitigate';
-        quick.disabled = !!mitigate.active() || done;
+        quick.disabled = mitigate.busy() || done;
         quick.setAttribute('aria-label', `${done ? status : 'Mitigate'} incident ${snapshot.id}`);
       }
     }
-    if (toolbar) toolbar.querySelector('.ico-report-name').textContent = report().name;
-    filterRows();
+    if (toolbar) {
+      const name = toolbar.querySelector('.ico-report-name'); name.textContent = context.report.name; name.title = context.report.name;
+    }
+    filterRows(context);
+  }
+  function bulkControls() {
+    const wrapper = UI.node('div', 'ico-bulk-actions'); wrapper.hidden = true;
+    const count = UI.node('strong', 'ico-selected-count');
+    const link = UI.button('Link'); link.dataset.action = 'link-selected'; link.setAttribute('aria-label', 'Link selected incidents');
+    const ignore = UI.button('Ignore'); ignore.dataset.action = 'ignore-selected'; ignore.setAttribute('aria-label', 'Ignore selected incidents');
+    const quick = UI.button('Mitigate', 'ico-mitigate-button'); quick.dataset.action = 'mitigate-selected'; quick.setAttribute('aria-label', 'Mitigate selected incidents');
+    const status = UI.node('span', 'ico-bulk-status'); status.setAttribute('role', 'status');
+    function showStatus(message, error = false) { status.textContent = message; status.title = message; status.classList.toggle('ico-error', error); }
+    link.addEventListener('click', () => {
+      const incidents = selectedIncidents();
+      if (!incidents.length || bulkBusy || mitigate.busy() || editor?.panel.isConnected) return;
+      const sourceUrl = location.href;
+      editor = UI.openLinkPicker({ db, reportId: report().id, incidents, returnFocus: link, onChange: async payload => {
+        db = await request('link-incidents', payload);
+        if (payload.targetId && location.href === sourceUrl && report().id === payload.reportId) deselectIncidents(incidents);
+        refreshControls();
+        showStatus(`${payload.incidents.length} linked.`); return db;
+      } });
+    });
+    ignore.addEventListener('click', async () => {
+      const incidents = selectedIncidents();
+      if (!incidents.length || bulkBusy || mitigate.busy()) return;
+      const selectedReport = report(), sourceUrl = location.href;
+      const payload = { reportId: selectedReport.id, incidents, ignored: true,
+        ...M.triageBase(db, selectedReport.id, incidents),
+      };
+      bulkBusy = true; showStatus('Ignoring…'); refreshControls();
+      try {
+        db = await request('ignore-incidents', payload);
+        if (location.href === sourceUrl && report().id === selectedReport.id) deselectIncidents(incidents);
+        showStatus(`${incidents.length} ignored.`);
+      }
+      catch (error) { showStatus(error.message, true); }
+      finally { bulkBusy = false; refreshControls(); }
+    });
+    quick.addEventListener('click', async event => {
+      // The batch is an official ICM action, authorized only by a real click.
+      if (!event.isTrusted || bulkBusy || mitigate.busy()) return;
+      const incidents = selectedIncidents(); if (!incidents.length) return;
+      const selectedReportId = report().id, sourceUrl = location.href;
+      bulkBusy = true; showStatus('Mitigating…'); refreshControls();
+      try {
+        const result = await mitigate.startBatch(incidents, {
+          shouldContinue: () => location.href === sourceUrl && report().id === selectedReportId,
+          onResult: async (id, result) => {
+            db = await request('observe', { reportId: selectedReportId, snapshots: [{ id, status: result.status }] });
+            refreshControls();
+          },
+        });
+        showStatus(`${result.completed.length} mitigated · ${result.skipped.length} skipped${result.stoppedAt ? ` · Stopped at #${result.stoppedAt}: ${result.error}` : ''}`, !!result.stoppedAt);
+      } catch (error) { showStatus(error.message, true); }
+      finally { bulkBusy = false; refreshControls(); }
+    });
+    wrapper.append(count, link, ignore, quick, status);
+    return wrapper;
   }
   function openNotes(snapshot, anchor) {
     if (!snapshot || editor?.panel.isConnected) return;
@@ -176,11 +334,26 @@
     notes.addEventListener('click', () => openNotes(getSnapshot(), notes));
     return wrapper;
   }
+  function positionToolbar() {
+    if (!toolbar) return;
+    const query = isQueryPage();
+    const anchor = query && (document.querySelector('[role="menubar"][aria-label="Bulk actions"]')?.closest('.ms-Stack')
+      || document.querySelector('.searchresults-k-grid'));
+    // A query toolbar has no floating fallback. Keep it hidden until its
+    // destination exists, including while ICM remounts the list controls.
+    if (query && !anchor && !toolbar.hidden) toolbar.hidden = true;
+    if (toolbar.classList.contains('ico-toolbar-inline') !== query) toolbar.classList.toggle('ico-toolbar-inline', query);
+    if (anchor) {
+      if (toolbar.nextElementSibling !== anchor) anchor.before(toolbar);
+    } else if (toolbar.parentElement !== document.body) document.body.appendChild(toolbar);
+    const hidden = query && !anchor;
+    if (toolbar.hidden !== hidden) toolbar.hidden = hidden;
+  }
   function enhance() {
     if (!db) return;
+    const context = listContext();
     const snapshots = [];
-    for (const row of document.querySelectorAll(ROWS)) {
-      const snapshot = rowSnapshot(row);
+    for (const [row, snapshot] of context.rows) {
       const old = row.querySelector('.ico-row-actions');
       if (!snapshot?.cell) { old?.remove(); if (row.classList.contains('ico-row-hidden')) row.classList.remove('ico-row-hidden'); continue; }
       if (!old || old.parentElement !== snapshot.cell) {
@@ -194,8 +367,9 @@
     else if (!detail) dock?.remove();
     if (detail) snapshots.push({ id: detail.id, ...metadata(detail) });
     for (const snapshot of snapshots) if (snapshot.status && mitigate.result(snapshot.id) === snapshot.status) mitigate.clearResult(snapshot.id);
-    if (window.top === window.self && !toolbar?.isConnected) {
+    if (window.top === window.self && !toolbar) {
       toolbar = UI.node('div', 'ico-toolbar');
+      toolbar.hidden = true;
       const name = UI.node('span', 'ico-report-name');
       const open = UI.button('On-call dashboard', 'ico-primary');
       open.addEventListener('click', () => request('open').catch(error => UI.toast(error.message, true)));
@@ -212,34 +386,54 @@
         });
         wrapper.append(input, UI.node('span', '', label)); filters.append(wrapper);
       }
+      const hideMitigated = UI.button('Hide mitigated', 'ico-hide-mitigated'); hideMitigated.dataset.action = 'hide-mitigated';
+      hideMitigated.addEventListener('click', async () => {
+        hideMitigated.disabled = true;
+        try { db = await request('list-preferences', { patch: { hideMitigated: !db.listPreferences?.hideMitigated } }); }
+        catch (error) { UI.toast(error.message, true); }
+        finally { hideMitigated.disabled = false; refreshControls(); }
+      });
       const count = UI.node('span', 'ico-hidden-count'); count.setAttribute('role', 'status'); count.title = 'Local filtering of loaded rows only. ICM totals and pagination are unchanged.';
-      filters.append(count);
-      toolbar.append(name, open, ignored, filters); document.body.appendChild(toolbar);
+      filters.append(hideMitigated, count);
+      toolbar.append(name, open, ignored, filters, bulkControls());
     }
-    refreshControls();
-    // Only publish new metadata, except that a newly tracked incident can use
-    // an already visible creation date. Never replay stale title/status fields
-    // when it is tracked from the dashboard, local API or another tab.
+    positionToolbar();
+    refreshControls(context);
+    publishObservations(snapshots, context);
+  }
+  async function publishObservations(snapshots, context) {
     if (observing) return;
-    const changed = snapshots.flatMap(snapshot => {
-      const key = `${report().id}:${snapshot.id}`;
-      const signature = JSON.stringify(metadata(snapshot));
-      const previous = observedSnapshots.get(key);
-      const entry = report().entries[snapshot.id];
-      const eligible = !!(entry?.tracked || M.linkedSummary(M.reportForDisplay(db), snapshot.id)) && !M.isIgnored(db, snapshot.id);
-      observedSnapshots.set(key, { signature, eligible });
-      if (!eligible) return [];
-      const candidate = previous?.signature !== signature ? snapshot
-        : !previous.eligible && snapshot.day && !M.createdDay(entry.day) ? { id: snapshot.id, day: snapshot.day } : null;
-      return candidate && METADATA_FIELDS.some(field => candidate[field] && candidate[field] !== entry[field]) ? [candidate] : [];
-    });
-    if (changed.length) {
-      observing = true;
-      request('observe', { reportId: report().id, snapshots: changed })
-        .then(value => { db = value; refreshControls(); }).catch(error => UI.toast(error.message, true)).finally(() => { observing = false; enhance(); });
+    observing = true;
+    let saved = false;
+    try {
+      if (observationReadback) {
+        // A missing acknowledgement may still have committed the update.
+        db = await request('get');
+        observationReadback = false;
+        context = { report: M.currentReport(db, context.report.id), displayedReport: M.reportForDisplay(db, context.report.id) };
+        refreshControls();
+      }
+      const batch = observations.collect(context.report, context.displayedReport, snapshots);
+      if (!batch.snapshots.length) return;
+      db = await request('observe', batch);
+      saved = true;
+      refreshControls();
+    } catch (error) {
+      observationReadback = true;
+      UI.toast(error.message, true);
+    } finally {
+      observing = false;
+      // Reconcile changes that arrived during a successful save. On failure,
+      // retain pending metadata until the next page/storage update, without a retry loop.
+      if (saved) enhance();
     }
   }
   const observer = new MutationObserver(mutations => {
+    // Reconcile range/keyboard selection before painting hidden rows or
+    // exposing them to a bulk action; other page enhancement stays debounced.
+    if (db && mutations.some(mutation => mutation.type === 'attributes'
+      && ['aria-selected', 'aria-checked', 'checked', 'class'].includes(mutation.attributeName)
+      && mutation.target.closest?.(ROWS) && !mutation.target.closest('.ico-row-actions'))) filterRows();
     if (!mutations.some(mutation => {
       const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement;
       if (target?.closest('.ico-row-actions, .ico-detail-actions, .ico-overlay, .ico-toolbar, .ico-toast, .ico-mitigation')) return false;
@@ -247,6 +441,7 @@
       if ([...mutation.removedNodes].some(node => node.nodeType === 1 && node.matches('.ico-row-actions') && target?.closest(ROWS))) return true;
       return [...mutation.addedNodes, ...mutation.removedNodes].some(node => node.nodeType === 3 || (node.nodeType === 1 && !node.matches('.ico-row-actions, .ico-detail-actions, .ico-overlay, .ico-toolbar, .ico-toast, .ico-mitigation')));
     })) return;
+    positionToolbar();
     clearTimeout(timer); timer = setTimeout(enhance, 80);
   });
   chrome.storage.onChanged.addListener((changes, area) => {

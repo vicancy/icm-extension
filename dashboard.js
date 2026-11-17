@@ -2,17 +2,17 @@
   const M = IcmOncall; const UI = IcmOncallUI; const request = IcmOncallClient.request;
   const $ = id => document.getElementById(id);
   let db, editor, copyReportId, backupPath = '';
+  let bridgeStatus = { state: 'disconnected' }, checkingAgent = false;
   const initialControls = [...document.querySelectorAll('button, input, select')];
   initialControls.forEach(control => { control.disabled = true; });
   const current = () => M.reportForDisplay(db);
   const failure = error => { $('status').textContent = error.message; $('status').classList.add('ico-error'); };
   const filename = ext => `${current().name.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-|-$/g, '') || 'oncall-report'}.${ext}`;
   const excerpt = value => value.length > 220 ? value.slice(0, 217) + '…' : value;
-  async function change(type, args = {}) { db = await request(type, args); render(); return db; }
   function editEntry(entry, anchor) {
     if (editor?.panel.isConnected) return;
     const report = current();
-    editor = UI.openEditor({ report, entry, returnFocus: anchor, onSave: (patch, base) => change('save', { reportId: report.id, incidentId: entry.id, patch, base }) });
+    editor = UI.openEditor({ report, entry, returnFocus: anchor, onSave: (patch, base) => request('save', { reportId: report.id, incidentId: entry.id, patch, base }) });
   }
   function renderCopyRange() {
     if (!db) return;
@@ -34,6 +34,8 @@
     if (!db) return;
     initialControls.forEach(control => { control.disabled = false; });
     const report = current();
+    const related = M.relatedIndex(report);
+    const groupCount = M.groups(report).length;
     if (copyReportId !== report.id) { $('copy-after').value = ''; copyReportId = report.id; }
     $('reports').replaceChildren(...db.reports.map(item => { const option = UI.node('option', '', item.name); option.value = item.id; return option; }));
     $('reports').value = report.id;
@@ -42,23 +44,23 @@
     const entries = M.trackedEntries(report).map(entry => ({ ...entry,
       ...Object.fromEntries(M.FIELDS.map(([key]) => [key, M.knownText(entry[key])])),
     }));
-    $('tracked-count').textContent = entries.length; $('group-count').textContent = M.groups(report).length;
+    $('tracked-count').textContent = entries.length; $('group-count').textContent = groupCount;
     $('root-count').textContent = entries.filter(entry => !entry.rootCause).length;
     $('resolution-count').textContent = entries.filter(entry => !entry.resolution).length;
     const query = $('search').value.toLowerCase().trim();
     const visible = entries.filter(entry => ($('filter').value === 'all' || !entry.rootCause || !entry.resolution)
-      && (!query || [entry.id, ...M.FIELDS.map(([key]) => entry[key]), ...M.relatedEntries(report, entry.id).flatMap(item => [item.id, item.title])].join(' ').toLowerCase().includes(query)));
+      && (!query || [entry.id, ...M.FIELDS.map(([key]) => entry[key]), ...(related.get(entry.id) || []).flatMap(item => [item.id, item.title])].join(' ').toLowerCase().includes(query)));
     const rows = visible.map(entry => {
       const row = UI.node('tr'); const titleCell = UI.node('td', 'incident-title');
       const id = UI.node('a', 'incident-id', `#${entry.id} ↗`); id.href = M.incidentUrl(entry.id); id.target = '_blank'; id.rel = 'noopener noreferrer';
       titleCell.append(id, UI.node('div', '', entry.title || 'Title not recorded'));
-      const related = M.relatedEntries(report, entry.id);
-      if (related.length) {
+      const relatedIncidents = related.get(entry.id) || [];
+      if (relatedIncidents.length) {
         const links = UI.node('div', 'related-incident-links'); links.append(UI.node('span', '', 'Related: '));
-        for (const item of related.slice(0, 5)) {
+        for (const item of relatedIncidents.slice(0, 5)) {
           const link = UI.node('a', '', `#${item.id}`); link.href = M.incidentUrl(item.id); link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = item.title || `Incident ${item.id}`; links.append(link, document.createTextNode(' '));
         }
-        if (related.length > 5) links.append(UI.node('span', '', `+${related.length - 5}`));
+        if (relatedIncidents.length > 5) links.append(UI.node('span', '', `+${relatedIncidents.length - 5}`));
         titleCell.append(links);
       }
       const state = UI.node('td'); state.append(UI.node('span', 'severity', entry.severity ? `Sev ${entry.severity}` : 'Severity —'), UI.node('div', 'state-label', entry.status || 'Status not recorded'));
@@ -68,42 +70,52 @@
       }
       const actions = UI.node('td', 'row-buttons'); const edit = UI.button('Edit notes'); edit.setAttribute('aria-label', `Edit notes for incident ${entry.id}`);
       edit.addEventListener('click', () => editEntry(report.entries[entry.id], edit));
-      const relatedButton = UI.button(`Related ICMs (${related.length})`, 'ico-subtle'); relatedButton.setAttribute('aria-label', `Related ICMs for incident ${entry.id}`);
+      const relatedButton = UI.button(`Related ICMs (${relatedIncidents.length})`, 'ico-subtle'); relatedButton.setAttribute('aria-label', `Related ICMs for incident ${entry.id}`);
       relatedButton.addEventListener('click', () => {
         if (editor?.panel.isConnected) return;
         editor = UI.openRelatedIncidents({ db, reportId: report.id, incidentId: entry.id, returnFocus: relatedButton,
-          onChange: payload => change('link-incidents', payload) });
+          onChange: payload => request('link-incidents', payload) });
+      });
+      const linkTo = UI.button('Link to…', 'ico-subtle'); linkTo.setAttribute('aria-label', `Link incident ${entry.id} to another tracked incident`);
+      linkTo.addEventListener('click', () => {
+        if (editor?.panel.isConnected) return;
+        editor = UI.openLinkPicker({ db, reportId: report.id, incident: { id: entry.id }, returnFocus: linkTo,
+          onChange: payload => request('link-incidents', payload) });
       });
       const untrack = UI.button('Untrack', 'ico-subtle'); untrack.setAttribute('aria-label', `Untrack incident ${entry.id}`);
       untrack.addEventListener('click', async () => {
         untrack.disabled = true;
-        try { await change('save', { reportId: report.id, incidentId: entry.id, patch: { tracked: false } }); UI.toast('Removed from this report. Your notes are kept.'); }
+        try { await request('save', { reportId: report.id, incidentId: entry.id, patch: { tracked: false } }); UI.toast('Removed from this report. Your notes are kept.'); }
         catch (error) { failure(error); untrack.disabled = false; }
       });
       const ignore = UI.button('Ignore', 'ico-subtle'); ignore.setAttribute('aria-label', `Ignore incident ${entry.id}`);
       ignore.addEventListener('click', async () => {
         ignore.disabled = true;
-        try { await change('ignore', { reportId: report.id, incidentId: entry.id, ignored: true, title: entry.title }); UI.toast('Ignored across reports. Your notes are kept.'); }
+        try { await request('ignore', { reportId: report.id, incidentId: entry.id, ignored: true, title: entry.title }); UI.toast('Ignored across reports. Your notes are kept.'); }
         catch (error) { failure(error); ignore.disabled = false; }
       });
-      actions.append(edit, relatedButton, untrack, ignore); row.append(actions); return row;
+      actions.append(edit, relatedButton, linkTo, untrack, ignore); row.append(actions); return row;
     });
     $('incidents').replaceChildren(...rows); $('empty').hidden = entries.length !== 0;
     $('status').classList.remove('ico-error');
-    $('status').textContent = entries.length ? `${visible.length} of ${entries.length} tracked incidents · ${M.groups(report).length} rows in the exported summary` : '';
+    $('status').textContent = entries.length ? `${visible.length} of ${entries.length} tracked incidents · ${groupCount} rows in the exported summary` : '';
     for (const id of ['html', 'csv']) $(id).disabled = entries.length === 0;
     renderCopyRange();
-    checkAgent();
+    renderBackup(bridgeStatus);
   }
-  $('reports').addEventListener('change', () => change('select-report', { reportId: $('reports').value }).catch(failure));
+  $('reports').addEventListener('change', () => request('select-report', { reportId: $('reports').value }).catch(failure));
   $('ignored').addEventListener('click', () => request('open-ignored').catch(failure));
   async function checkAgent() {
+    if (checkingAgent) return;
+    checkingAgent = true;
     try {
       const result = await request('bridge-status');
+      bridgeStatus = result;
       const labels = { connected: 'Agent: connected', connecting: 'Agent: connecting…', disconnected: 'Agent: offline', 'not-installed': 'Agent: not installed' };
       $('agent-status').textContent = labels[result.state] || 'Agent: offline';
       renderBackup(result);
-    } catch { $('agent-status').textContent = 'Agent: unavailable'; renderBackup({ state: 'disconnected' }); }
+    } catch { bridgeStatus = { state: 'disconnected' }; $('agent-status').textContent = 'Agent: unavailable'; renderBackup(bridgeStatus); }
+    finally { checkingAgent = false; }
   }
   function renderBackup(result) {
     const backup = result.backup || { state: result.state === 'not-installed' ? 'not-installed' : 'offline' };
@@ -135,17 +147,18 @@
     catch { failure(new Error('Could not copy the path. Select the Backup file path and copy it manually.')); }
   });
   $('backup-now').addEventListener('click', async () => {
-    try { renderBackup(await request('backup-now')); } catch (error) { failure(error); }
+    try { bridgeStatus = await request('backup-now'); renderBackup(bridgeStatus); } catch (error) { failure(error); }
   });
   $('restore-backup').addEventListener('click', async () => {
     $('restore-backup').disabled = true;
-    try { await change('restore-backup'); UI.toast('Backup restored as separate reports. Your current notes are kept.'); }
-    catch (error) { failure(error); checkAgent(); }
+    try { await request('restore-backup'); UI.toast('Backup restored as separate reports. Your current notes are kept.'); }
+    catch (error) { failure(error); }
+    finally { checkAgent(); }
   });
   checkAgent();
   setInterval(checkAgent, 3000);
-  $('new-report').addEventListener('click', () => UI.editReport(null, fields => change('create-report', { fields }), $('new-report')));
-  $('settings').addEventListener('click', () => { const report = current(); UI.editReport(report, fields => change('edit-report', { reportId: report.id, fields }), $('settings')); });
+  $('new-report').addEventListener('click', () => UI.editReport(null, fields => request('create-report', { fields }), $('new-report')));
+  $('settings').addEventListener('click', () => { const report = current(); UI.editReport(report, fields => request('edit-report', { reportId: report.id, fields }), $('settings')); });
   $('search').addEventListener('input', render); $('filter').addEventListener('change', render);
   $('add-form').addEventListener('submit', async event => {
     event.preventDefault(); const id = M.incidentId($('add-id').value);
@@ -153,7 +166,7 @@
     const ignored = M.isIgnored(db, id);
     const patch = { tracked: true };
     if (ignored && !M.currentReport(db).entries[id]?.title && db.ignoredIncidents[id].title) patch.title = db.ignoredIncidents[id].title;
-    try { await change('save', { reportId: current().id, incidentId: id, patch, restoreIgnored: ignored, baseIgnored: ignored }); $('add-id').value = ''; } catch (error) { failure(error); }
+    try { await request('save', { reportId: current().id, incidentId: id, patch, restoreIgnored: ignored, baseIgnored: ignored }); $('add-id').value = ''; } catch (error) { failure(error); }
   });
   $('copy-after').addEventListener('input', renderCopyRange);
   for (const [id, includeHeaders] of [['copy', true], ['copy-without-headers', false]]) $(id).addEventListener('click', async () => {
@@ -172,10 +185,12 @@
     const file = $('import-file').files[0]; if (!file) return;
     try {
       if (file.size > M.MAX_BACKUP_BYTES) throw new Error('Choose a backup smaller than 32 MB.');
-      await change('import', { data: JSON.parse(await file.text()) }); UI.toast('Backup imported as separate reports. Existing reports are unchanged.');
+      await request('import', { data: JSON.parse(await file.text()) }); UI.toast('Backup imported as separate reports. Existing reports are unchanged.');
     } catch (error) { failure(error); }
     $('import-file').value = '';
   });
+  // Storage events render both local and cross-tab saves exactly once. Request
+  // responses still return the saved report to editors without rendering it again.
   chrome.storage.onChanged.addListener((changes, area) => { if (area === 'local' && changes[M.STORAGE_KEY]?.newValue) { db = changes[M.STORAGE_KEY].newValue; render(); } });
-  request('get').then(value => { db = value; render(); }).catch(failure);
+  request('get').then(value => { if (!db) { db = value; render(); } }).catch(failure);
 })();

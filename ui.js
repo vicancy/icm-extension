@@ -154,28 +154,25 @@
     fields[0].input.focus();
   }
   function linkPayload(db, reportId, targetId, incidents) {
-    const report = M.currentReport(db, reportId);
-    return { reportId, targetId, incidents,
-      baseTargets: Object.fromEntries(incidents.map(item => [item.id, report.entries[item.id]?.summaryIncidentId || ''])),
-      baseIgnored: Object.fromEntries(incidents.map(item => [item.id, M.isIgnored(db, item.id)])),
-      baseTracked: Object.fromEntries(incidents.map(item => [item.id, !!report.entries[item.id]?.tracked])),
-    };
+    return { reportId, targetId, incidents, ...M.triageBase(db, reportId, incidents) };
   }
-  function openLinkPicker({ db, reportId, incident, onChange, returnFocus }) {
+  function openLinkPicker({ db, reportId, incident, incidents = [incident], onChange, returnFocus }) {
     const report = M.currentReport(db, reportId);
-    const editor = modal('Link to tracked incident', `#${incident.id} · ${report.name}`, returnFocus, 'Save', false);
+    const single = incidents.length === 1 ? incidents[0] : null;
+    const editor = modal('Link to tracked incident', `${single ? `#${single.id}` : `${incidents.length} selected`} · ${report.name}`, returnFocus, 'Save', false);
     editor.save.remove();
     let busy = false;
-    const candidates = M.trackedEntries(M.reportForDisplay(db, reportId)).filter(item => item.id !== incident.id && !item.summaryIncidentId);
+    const candidates = M.trackedEntries(M.reportForDisplay(db, reportId)).filter(item => item.id !== single?.id && !item.summaryIncidentId);
     const search = node('input', 'ico-input'); search.type = 'search'; search.placeholder = 'Find tracked incident'; search.setAttribute('aria-label', 'Find tracked incident');
     const searchField = node('div', 'ico-field'); searchField.append(search);
     const choices = node('div', 'ico-summary-choices');
-    const currentTarget = report.entries[incident.id]?.summaryIncidentId;
+    const currentTarget = single && report.entries[single.id]?.summaryIncidentId;
     async function choose(targetId) {
       if (busy) return;
       busy = true; editor.setBusy(true); editor.status.textContent = '';
       try {
-        await onChange(linkPayload(db, reportId, targetId, [incident]));
+        // The selected main incident remains tracked if it is in the batch.
+        await onChange(linkPayload(db, reportId, targetId, incidents.filter(item => item.id !== targetId)));
         editor.destroy(); toast(targetId ? `Linked to #${targetId}.` : 'Incident unlinked.');
       } catch (error) { editor.status.textContent = error.message; editor.status.classList.add('ico-error'); editor.setBusy(false); busy = false; }
     }

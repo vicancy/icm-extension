@@ -17,7 +17,7 @@ async function link(runtime, reportId, targetId, ids, overrides = {}) {
     baseTracked: Object.fromEntries(ids.map(id => [id, !!report.entries[id]?.tracked])), ...overrides });
 }
 
-test('one tracked summary owns multiple related ICMs without changing private notes or inferred counts', async () => {
+test('linking appends source Notes once while preserving source annotations and unknown counts', async () => {
   const { runtime, reportId } = await setup();
   await runtime.request('save', { reportId, incidentId: '123', patch: { notes: 'Original child notes', rootCause: 'Tentative child cause', tracked: true } });
   await link(runtime, reportId, '900', ['123', '456']);
@@ -28,7 +28,9 @@ test('one tracked summary owns multiple related ICMs without changing private no
   assert.equal(report.entries['123'].tracked, false);
   assert.equal(report.entries['123'].notes, 'Original child notes');
   assert.equal(report.entries['123'].rootCause, 'Tentative child cause');
-  assert.equal(report.entries['900'].notes, 'Manual analysis');
+  assert.equal(report.entries['900'].notes, 'Manual analysis\nOriginal child notes');
+  assert.equal(report.entries['900'].rootCause, 'Confirmed cause');
+  assert.equal(report.entries['900'].resolution, 'Recovered');
   assert.equal(report.entries['900'].occurrences, '');
   assert.equal(report.entries['900'].customersImpacted, '');
   const read = await runtime.agentRequest({ method: 'read_incident', params: { reportId, incidentId: '900' } });
@@ -36,6 +38,69 @@ test('one tracked summary owns multiple related ICMs without changing private no
   await assert.rejects(runtime.agentRequest({ method: 'save_incident', params: { reportId, incidentId: '123', fields: { resolution: 'Done' } } }), /linked to #900/);
   await runtime.agentRequest({ method: 'save_incident', params: { reportId, incidentId: '123', fields: { tracked: false, resolution: 'Done' } } });
   assert.equal(M.currentReport(await runtime.request('get')).entries['123'].summaryIncidentId, '900');
+});
+
+test('bulk linking appends only nonempty Notes in input order without duplicate IDs or extra labels', async () => {
+  const { runtime, reportId } = await setup();
+  for (const [id, notes] of [['123', 'First line\nSecond line'], ['456', ''], ['789', 'Evidence: https://example.com/logs?x=1&y=2']]) {
+    await runtime.request('save', { reportId, incidentId: id, patch: { notes, rootCause: 'Source cause', resolution: 'Source resolution' } });
+  }
+  await link(runtime, reportId, '900', ['789', '456', '123', '789']);
+  let report = M.currentReport(await runtime.request('get'));
+  const expected = 'Manual analysis\nEvidence: https://example.com/logs?x=1&y=2\nFirst line\nSecond line';
+  assert.equal(report.entries['900'].notes, expected);
+  assert.equal(report.entries['123'].notes, 'First line\nSecond line');
+  const dom = new JSDOM(M.exportReport(report).html); const cells = [...dom.window.document.querySelectorAll('td')];
+  assert.equal(cells.length, 11); assert.equal(cells[7].textContent, 'Confirmed cause');
+  assert.match(cells[10].innerHTML, /Manual analysis<br>Evidence:/);
+  assert.match(cells[10].innerHTML, /First line<br>Second line/);
+  assert.doesNotMatch(cells[10].textContent, /Source cause|Source resolution/);
+  assert.equal(cells[10].querySelector('a').href, 'https://example.com/logs?x=1&y=2'); dom.window.close();
+  await runtime.request('save', { reportId, incidentId: '123', patch: { notes: 'Later source edit' }, base: { notes: 'First line\nSecond line' } });
+  await link(runtime, reportId, '900', ['123']);
+  await link(runtime, reportId, '', ['123']);
+  report = M.currentReport(await runtime.request('get'));
+  assert.equal(report.entries['900'].notes, expected); // No live sync or deletion on unlink.
+  assert.equal(report.entries['123'].notes, 'Later source edit');
+  await runtime.request('save', { reportId, incidentId: '800', patch: { tracked: true } });
+  await link(runtime, reportId, '800', ['123']);
+  assert.equal(M.currentReport(await runtime.request('get')).entries['800'].notes, 'Later source edit');
+});
+
+test('note append preserves concurrent manual edits and rejects stale note replacement', async () => {
+  const { runtime, reportId } = await setup();
+  await runtime.request('save', { reportId, incidentId: '123', patch: { notes: 'A' } });
+  await runtime.request('save', { reportId, incidentId: '456', patch: { notes: 'B' } });
+  // Both link requests can read the same old target; the append uses the latest
+  // target when each queued operation executes, preserving the manual addition.
+  await Promise.all([
+    runtime.request('save', { reportId, incidentId: '900', patch: { notes: 'Manual analysis\nManual addition' }, base: { notes: 'Manual analysis' } }),
+    link(runtime, reportId, '900', ['123']), link(runtime, reportId, '900', ['456']),
+  ]);
+  const report = M.currentReport(await runtime.request('get'));
+  assert.equal(report.entries['900'].notes, 'Manual analysis\nManual addition\nA\nB');
+  await assert.rejects(runtime.request('save', { reportId, incidentId: '900', patch: { notes: 'Old draft' }, base: { notes: 'Manual analysis' } }), /Notes changed/);
+  assert.equal(M.currentReport(await runtime.request('get')).entries['900'].notes, report.entries['900'].notes);
+});
+
+test('link and Notes append commit atomically on failed storage, retry, and combined length limit', async () => {
+  const { runtime, reportId } = await setup();
+  await runtime.request('save', { reportId, incidentId: '123', patch: { notes: 'Keep source', tracked: true } });
+  runtime.failWrites(); await assert.rejects(link(runtime, reportId, '900', ['123']), /quota/);
+  runtime.failWrites(false);
+  let report = M.currentReport(await runtime.request('get'));
+  assert.equal(report.entries['900'].notes, 'Manual analysis');
+  assert.equal(report.entries['123'].tracked, true); assert.equal(report.entries['123'].summaryIncidentId, undefined);
+  await link(runtime, reportId, '900', ['123']);
+  await link(runtime, reportId, '900', ['123'], { baseTargets: { 123: '' }, baseTracked: { 123: true } });
+  report = M.currentReport(await runtime.request('get'));
+  assert.equal(report.entries['900'].notes, 'Manual analysis\nKeep source');
+  await runtime.request('save', { reportId, incidentId: '456', patch: { notes: 'x'.repeat(20000), tracked: true } });
+  await assert.rejects(link(runtime, reportId, '900', ['789', '456']), /Notes is too long/);
+  report = M.currentReport(await runtime.request('get'));
+  assert.equal(report.entries['900'].notes, 'Manual analysis\nKeep source');
+  assert.equal(report.entries['456'].tracked, true); assert.equal(report.entries['456'].notes.length, 20000);
+  assert.equal(report.entries['789'], undefined);
 });
 
 test('export puts numeric related links below the primary title in the Bug column and preserves Notes', async () => {
@@ -158,7 +223,7 @@ test('query Link picker attaches the visible incident, filters it, and can unlin
   assert.equal($('[data-action="track"]').disabled, false);
 });
 
-test('linked native-selected rows stay visible, and untracking or ignoring the summary returns children to the list', async t => {
+test('linked selections without a native checkbox stay visible as a fallback, and untracking or ignoring the summary returns children', async t => {
   const { runtime, reportId } = await setup(); const page = loadPage(runtime); t.after(page.close);
   const row = () => page.document.querySelector('.ms-DetailsRow');
   await waitFor(() => page.document.querySelector('[data-action="link"]'));

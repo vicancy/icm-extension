@@ -117,6 +117,17 @@ test('observed metadata updates tracked incidents without changing private notes
   assert.equal(report.entries['456'], undefined);
 });
 
+test('queued observations preserve concurrently saved fields and still merge unrelated metadata', async () => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  await runtime.request('save', { reportId, incidentId: '123', patch: { tracked: true, status: 'Active', notes: 'Private analysis' } });
+  await Promise.all([
+    runtime.request('save', { reportId, incidentId: '123', patch: { status: 'Resolved' }, base: { status: 'Active' } }),
+    runtime.request('observe', { reportId, snapshots: [{ id: '123', status: 'Mitigated', day: '2026-11-16' }], base: { 123: { status: 'Active', day: '' } } }),
+  ]);
+  const entry = M.currentReport(await runtime.request('get')).entries['123'];
+  assert.equal(entry.status, 'Resolved'); assert.equal(entry.day, '2026-11-16'); assert.equal(entry.notes, 'Private analysis');
+});
+
 test('reports keep separate records and imports never overwrite existing reports', async () => {
   const runtime = createRuntime(); const first = await runtime.request('get');
   await runtime.request('save', { reportId: first.activeReportId, incidentId: '123', patch: { tracked: true, notes: 'First rotation' } });

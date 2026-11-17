@@ -169,3 +169,24 @@ test('the progress UI prevents duplicate clicks and records success only after I
   assert.equal(h.api.active(), undefined); assert.equal(h.api.result('123'), 'Mitigated');
   assert.equal(h.document.querySelector('.ico-mitigation'), null);
 });
+
+test('a batch stops at a native validation failure and manual completion never resumes it', async t => {
+  const h = fixture(t, { extraRequired: true });
+  const result = await h.api.startBatch([{ id: '123' }, { id: '456' }]);
+  assert.equal(result.stoppedAt, '123'); assert.match(result.error, /additional required information/);
+  assert.equal(h.submissions, 0);
+  assert.ok(h.document.querySelector('[role="dialog"]'));
+  assert.equal(h.api.active(), '123');
+  h.document.querySelector('[data-testid]').textContent = 'Mitigated';
+  await waitFor(() => !h.api.active());
+  assert.equal(h.document.querySelector('iframe'), null);
+  assert.equal(h.submissions, 0);
+});
+
+test('a batch checks its original page/report before every native action', async t => {
+  let unchanged = true;
+  const h = fixture(t, { onReason: () => { unchanged = false; } });
+  const result = await h.api.startBatch([{ id: '123' }, { id: '456' }], { shouldContinue: () => unchanged });
+  assert.equal(result.stoppedAt, '123'); assert.match(result.error, /page or report changed/);
+  assert.equal(h.submissions, 0);
+});

@@ -1,6 +1,8 @@
 ((root) => {
   const STORAGE_KEY = 'icm-oncall-workspace-v1';
   const MAX_BACKUP_BYTES = 32 * 1024 * 1024;
+  const METADATA_FIELDS = ['title', 'severity', 'status', 'day'];
+  const LIST_PREFERENCES = ['showTracked', 'showIgnored', 'hideMitigated'];
   const validWorkspaceId = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
   const FIELDS = [
     ['day', 'Day (ICM created date)', 80],
@@ -99,10 +101,36 @@
     const report = currentReport(db, id);
     return { ...report, entries: Object.fromEntries(Object.entries(report.entries).filter(([incidentId]) => !isIgnored(db, incidentId))) };
   }
+  function triageBase(db, reportId, incidents) {
+    const report = currentReport(db, reportId);
+    return {
+      baseTargets: Object.fromEntries(incidents.map(item => [item.id, report.entries[item.id]?.summaryIncidentId || ''])),
+      baseIgnored: Object.fromEntries(incidents.map(item => [item.id, isIgnored(db, item.id)])),
+      baseTracked: Object.fromEntries(incidents.map(item => [item.id, !!report.entries[item.id]?.tracked])),
+    };
+  }
+  function listPreferences(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.entries(value).some(([key, enabled]) => !LIST_PREFERENCES.includes(key) || typeof enabled !== 'boolean')) {
+      throw new Error('Invalid list visibility preferences.');
+    }
+    return { ...value };
+  }
   const trackedEntries = report => Object.values(report.entries).filter(entry => entry.tracked)
     .sort((a, b) => (b.trackedAt || 0) - (a.trackedAt || 0) || a.id.localeCompare(b.id));
+  const byIncidentId = (a, b) => a.id.localeCompare(b.id, undefined, { numeric: true });
   const relatedEntries = (report, id) => Object.values(report.entries).filter(entry => entry.summaryIncidentId === id)
-    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+    .sort(byIncidentId);
+  function relatedIndex(report) {
+    const index = new Map();
+    for (const entry of Object.values(report.entries)) {
+      if (!entry.summaryIncidentId) continue;
+      if (!index.has(entry.summaryIncidentId)) index.set(entry.summaryIncidentId, []);
+      index.get(entry.summaryIncidentId).push(entry);
+    }
+    for (const entries of index.values()) entries.sort(byIncidentId);
+    return index;
+  }
   function linkedSummary(report, id) {
     const summaryId = report.entries[id]?.summaryIncidentId;
     const summary = summaryId && report.entries[summaryId];
@@ -148,9 +176,10 @@
   }
   function exportReport(report, { includeHeaders = true, afterIncident = '' } = {}) {
     const entries = exportEntries(report, afterIncident);
+    const related = relatedIndex(report);
     const exportGroups = groups(report, entries).map(group => ({ ...group, entries: group.entries.map(entry => ({
       ...entry, ...Object.fromEntries(FIELDS.map(([key]) => [key, key === 'day' ? createdDay(entry.day) : knownText(entry[key])])),
-      relatedIncidents: relatedEntries(report, entry.id),
+      relatedIncidents: related.get(entry.id) || [],
     })) }));
     const exportText = (entries, key) => key === 'notes'
       ? combined(entries.map(entry => ({ ...entry, notes: [
@@ -224,13 +253,11 @@
       metadata.workspaceId = input.workspaceId;
     }
     if (input.listPreferences !== undefined) {
-      if (!input.listPreferences || typeof input.listPreferences !== 'object' || Array.isArray(input.listPreferences)
-        || Object.entries(input.listPreferences).some(([key, value]) => !['showTracked', 'showIgnored'].includes(key) || typeof value !== 'boolean')) throw new Error('Invalid list preferences in backup.');
-      metadata.listPreferences = { ...input.listPreferences };
+      metadata.listPreferences = listPreferences(input.listPreferences);
     }
     return { version: 1, ...metadata, activeReportId: seen.has(input.activeReportId) ? input.activeReportId : reports[0]?.id, reports, ignoredIncidents };
   }
-  const api = { STORAGE_KEY, MAX_BACKUP_BYTES, validWorkspaceId, FIELDS, COLUMNS, knownText, createdDay, incidentId, incidentUrl, parseIncidentIds, emptyEntry, patchEntry, reportFields, currentReport, reportForDisplay, isIgnored, ignoredEntries, trackedEntries, relatedEntries, linkedSummary, groups, exportEntries, exportReport, validateBackup, escapeHtml };
+  const api = { STORAGE_KEY, MAX_BACKUP_BYTES, METADATA_FIELDS, validWorkspaceId, FIELDS, COLUMNS, knownText, createdDay, incidentId, incidentUrl, parseIncidentIds, emptyEntry, patchEntry, reportFields, currentReport, reportForDisplay, triageBase, listPreferences, isIgnored, ignoredEntries, trackedEntries, relatedEntries, relatedIndex, linkedSummary, groups, exportEntries, exportReport, validateBackup, escapeHtml };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.IcmOncall = api;
 })(globalThis);

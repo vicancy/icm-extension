@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const M = require('./model');
 const { createRuntime, loadPage, waitFor } = require('./test/runtime');
 
@@ -40,6 +42,44 @@ test('recycled rows and removed controls bind to the current incident ID', async
   await waitFor(() => d.querySelector('.ico-row-actions'));
   assert.equal(d.querySelectorAll('.ico-row-actions').length, 1);
   assert.equal(d.querySelector('[data-action="track"]').textContent, 'Tracked');
+});
+
+test('the query toolbar waits for its top position without a bottom flash and reuses the same controls after remounts', async t => {
+  const page = loadPage(createRuntime()); t.after(page.close); const d = page.document;
+  const style = d.createElement('style'); style.textContent = fs.readFileSync(path.join(__dirname, 'content.css'), 'utf8'); d.head.append(style);
+  await waitFor(() => d.querySelector('.ico-toolbar'));
+  const toolbar = d.querySelector('.ico-toolbar');
+  assert.equal(toolbar.hidden, true);
+  assert.equal(page.window.getComputedStyle(toolbar).display, 'none');
+  assert.equal(page.window.getComputedStyle(toolbar).position, 'static');
+  const nativeControls = d.createElement('section');
+  const markup = '<div class="ms-Stack"><div role="menubar" aria-label="Bulk actions"></div></div>';
+  nativeControls.innerHTML = markup; d.body.prepend(nativeControls);
+  await waitFor(() => nativeControls.querySelector('.ico-toolbar-inline'));
+  assert.equal(toolbar.hidden, false);
+  assert.equal(page.window.getComputedStyle(toolbar).position, 'static');
+  assert.equal(nativeControls.firstElementChild.nextElementSibling, nativeControls.querySelector('.ms-Stack'));
+  nativeControls.replaceChildren();
+  await waitFor(() => toolbar.hidden);
+  assert.equal(page.window.getComputedStyle(toolbar).display, 'none');
+  nativeControls.innerHTML = markup;
+  await waitFor(() => nativeControls.querySelector('.ico-toolbar-inline'));
+  assert.equal(nativeControls.querySelector('.ico-toolbar'), toolbar);
+  assert.equal(toolbar.hidden, false);
+  assert.equal(d.querySelectorAll('.ico-toolbar').length, 1);
+  page.dom.reconfigure({ url: M.incidentUrl('123') });
+  await waitFor(() => d.querySelector('.ico-detail-actions'));
+  assert.equal(d.querySelector('.ico-toolbar').parentElement, d.body);
+  assert.equal(d.querySelector('.ico-toolbar-inline'), null);
+  assert.equal(toolbar.hidden, false);
+  nativeControls.remove();
+  page.dom.reconfigure({ url: 'https://portal.microsofticm.com/imp/v5/incidents/queries/my-teams' });
+  d.body.append(d.createElement('section'));
+  await waitFor(() => toolbar.hidden && toolbar.classList.contains('ico-toolbar-inline'));
+  assert.equal(page.window.getComputedStyle(toolbar).display, 'none');
+  d.body.prepend(nativeControls);
+  await waitFor(() => !toolbar.hidden && nativeControls.querySelector('.ico-toolbar'));
+  assert.equal(nativeControls.querySelector('.ico-toolbar'), toolbar);
 });
 
 test('a failed save leaves the draft visible and retry succeeds', async t => {
@@ -192,6 +232,81 @@ test('a stale tab cannot repeatedly overwrite metadata observed in another tab',
   assert.equal(runtime.messages.filter(message => message.type === 'oncall:observe').length, 1);
   older.document.querySelector('[data-automation-key="State"]').textContent = 'Resolved';
   await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].status === 'Resolved');
+});
+
+test('failed metadata writes recover on the next page update after reading the latest saved fields', async t => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  await runtime.request('save', { reportId, incidentId: '123', patch: { tracked: true, title: 'A sample incident', severity: '3', status: 'Active', notes: 'Keep my analysis' } });
+  const page = loadPage(runtime); t.after(page.close);
+  await waitFor(() => page.document.querySelector('.ico-row-actions'));
+  runtime.failWrites();
+  page.document.querySelector('[data-automation-key="State"]').textContent = 'Mitigated';
+  await waitFor(() => page.document.querySelector('.ico-toast.ico-error'));
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(runtime.messages.filter(message => message.type === 'oncall:observe').length, 1, 'failed writes must not spin in a retry loop');
+  const beforeRetry = runtime.messages.length;
+  runtime.failWrites(false);
+  page.document.body.append(page.document.createElement('p'));
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].status === 'Mitigated');
+  assert.deepEqual(runtime.messages.slice(beforeRetry).map(message => message.type), ['oncall:get', 'oncall:observe']);
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['123'].notes, 'Keep my analysis');
+});
+
+test('metadata recovery keeps newer cross-tab fields while retrying unrelated missing metadata', async t => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  await runtime.request('save', { reportId, incidentId: '123', patch: { tracked: true, title: 'A sample incident', severity: '3', status: 'Active' } });
+  const page = loadPage(runtime); t.after(page.close);
+  await waitFor(() => page.document.querySelector('.ico-row-actions'));
+  runtime.failWrites();
+  page.document.querySelector('[data-automation-key="State"]').textContent = 'Mitigated';
+  const date = page.document.createElement('div'); date.dataset.automationKey = 'CreatedDate'; date.textContent = '2026-11-16 00:30 GMT+8';
+  page.document.querySelector('.ms-DetailsRow').append(date);
+  await waitFor(() => page.document.querySelector('.ico-toast.ico-error'));
+  runtime.failWrites(false);
+  await runtime.request('save', { reportId, incidentId: '123', patch: { status: 'Resolved', notes: 'Newer manual analysis' } });
+  await waitFor(() => runtime.data[M.STORAGE_KEY].reports[0].entries['123'].day === '2026-11-16');
+  const entry = runtime.data[M.STORAGE_KEY].reports[0].entries['123'];
+  assert.equal(entry.status, 'Resolved'); assert.equal(entry.notes, 'Newer manual analysis');
+  const attempts = runtime.messages.filter(message => message.type === 'oncall:observe');
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[1].snapshots, [{ id: '123', day: '2026-11-16' }]);
+});
+
+test('an unacknowledged metadata save is read back without replaying a committed update', async t => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  await runtime.request('save', { reportId, incidentId: '123', patch: { tracked: true, title: 'A sample incident', severity: '3', status: 'Active' } });
+  const send = runtime.chrome.runtime.sendMessage;
+  let loseAcknowledgement = true;
+  runtime.chrome.runtime.sendMessage = async message => {
+    const response = await send(message);
+    if (message.type === 'oncall:observe' && loseAcknowledgement) { loseAcknowledgement = false; throw new Error('Acknowledgement lost'); }
+    return response;
+  };
+  const page = loadPage(runtime); t.after(page.close);
+  await waitFor(() => page.document.querySelector('.ico-row-actions'));
+  const beforeChange = runtime.messages.length;
+  page.document.querySelector('[data-automation-key="State"]').textContent = 'Mitigated';
+  await waitFor(() => page.document.querySelector('.ico-toast.ico-error'));
+  page.document.body.append(page.document.createElement('p'));
+  await waitFor(() => runtime.messages.slice(beforeChange).some(message => message.type === 'oncall:get'));
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(runtime.data[M.STORAGE_KEY].reports[0].entries['123'].status, 'Mitigated');
+  assert.equal(runtime.messages.filter(message => message.type === 'oncall:observe').length, 1);
+});
+
+test('dashboard search renders locally and preserves the unavailable backup controls', async t => {
+  const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
+  await runtime.request('save', { reportId, incidentId: '123', patch: { tracked: true, title: 'Sample incident' } });
+  const page = loadPage(runtime, { dashboard: true }); t.after(page.close);
+  await waitFor(() => page.document.querySelectorAll('#incidents tr').length === 1 && page.document.querySelector('#agent-status').textContent === 'Agent: not installed');
+  const beforeSearch = runtime.messages.length;
+  const search = page.document.querySelector('#search');
+  for (const query of ['S', 'Sa', 'Sample']) {
+    search.value = query; search.dispatchEvent(new page.window.Event('input'));
+    assert.equal(page.document.querySelectorAll('#incidents tr').length, 1);
+    assert.equal(page.document.querySelector('#backup-now').disabled, true);
+  }
+  assert.equal(runtime.messages.length, beforeSearch, 'search must not request bridge or workspace data');
 });
 
 test('OneNote copy includes all tracked rows even when the dashboard is filtered', async t => {

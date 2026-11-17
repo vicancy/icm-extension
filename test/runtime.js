@@ -63,7 +63,7 @@ function loadPage(runtime, { html, url = 'https://portal.microsofticm.com/imp/v5
   const registered = [];
   dom.window.chrome = { ...runtime.chrome, storage: { ...runtime.chrome.storage, onChanged: { addListener(fn) { registered.push(fn); runtime.chrome.storage.onChanged.addListener(fn); } } } };
   dom.window.confirm = () => true;
-  for (const file of ['model.js', 'client.js', 'ui.js', ...(ignored ? ['ignored.js'] : dashboard ? ['dashboard.js'] : ['mitigate.js', 'content.js'])]) dom.window.eval(fs.readFileSync(path.join(root, file), 'utf8'));
+  for (const file of ['model.js', 'client.js', 'ui.js', ...(ignored ? ['ignored.js'] : dashboard ? ['dashboard.js'] : ['mitigate.js', 'observations.js', 'content.js'])]) dom.window.eval(fs.readFileSync(path.join(root, file), 'utf8'));
   const close = () => { registered.forEach(fn => runtime.chrome.storage.onChanged.removeListener(fn)); dom.window.close(); };
   return { dom, window: dom.window, document: dom.window.document, close };
 }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ICM On-call Workspace",
-  "version": "2.7.0",
+  "version": "2.9.0",
   "description": "Track incidents, keep private notes, mitigate recovered incidents and export your handoff to OneNote.",
   "permissions": ["storage", "alarms", "contextMenus", "sidePanel"],
   "host_permissions": ["http://127.0.0.1:4176/*"],
@@ -13,7 +13,7 @@
     {
       "matches": ["https://portal.microsofticm.com/*"],
       "css": ["content.css"],
-      "js": ["model.js", "client.js", "ui.js", "mitigate.js", "content.js"],
+      "js": ["model.js", "client.js", "ui.js", "mitigate.js", "observations.js", "content.js"],
       "all_frames": true,
       "run_at": "document_idle"
     }
