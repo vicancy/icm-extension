@@ -1,10 +1,8 @@
 # MeOncall
 
-MeOncall is an English-language Edge extension for local incident investigation and OneNote handoffs, previously named **ICM On-call Workspace**. Track incidents, link repeated cases, ignore noise, keep Notes/Root cause/Resolution, and export a summary. Local annotations never update official ICM fields; **Quick Mitigate** is a separate, explicit official action.
+MeOncall is an English-language Edge extension for local incident investigation and OneNote handoffs. Track incidents, link repeated cases, ignore noise, keep Notes/Root cause/Resolution, and export a summary. Local annotations never update official ICM fields; **Quick Mitigate** is a separate, explicit official action.
 
-Use **MeOncall** as the stable product name in chats and skills. On this machine, the personal **`$meoncall`** skill at `C:\Users\lianwei\.codex\skills\meoncall\SKILL.md` maps that name and the old dashboard names to the installed repository and local API. It can be used from another working directory, for example: "Use $meoncall to record this case." The repository path, storage keys, bridge configuration, backup location and startup filename retain their existing names for compatibility.
-
-For a new session: read [AGENTS.md](AGENTS.md), check `git status`, and preserve existing edits. This README describes current behavior; [manifest.json](manifest.json) holds the extension version. Detailed agent API and backup setup lives in [bridge/README.md](bridge/README.md).
+The optional **`$meoncall`** Codex skill locates the installed extension and local API from other workspaces; see [Install the Codex skill](#install-the-codex-skill).
 
 ## Install and use
 
@@ -12,6 +10,24 @@ For a new session: read [AGENTS.md](AGENTS.md), check `git status`, and preserve
 2. After code changes, **Reload** the extension and refresh open ICM/dashboard tabs; existing tabs retain old scripts.
 3. Open [My Teams' Incidents](https://portal.microsofticm.com/imp/v5/incidents/queries/my-teams). Use **Track**, **Notes**, **Link**, **Ignore**, or **Mitigate** beside an incident. The extension icon opens the dashboard.
 4. Select/create the current report, fill summaries, then **Copy table for OneNote**. **Needs summary** finds missing Root cause or Resolution. HTML and CSV downloads are also available.
+
+### Install the Codex skill
+
+1. Install the extension above, then follow [local API setup](bridge/README.md#install-once). Run those commands from your checkout's root and verify `node bridge/cli.cjs status` reports `connected: true` with Edge running.
+2. Copy [skills/meoncall/SKILL.md](skills/meoncall/SKILL.md) into `$CODEX_HOME/skills/meoncall`, or `~/.codex/skills/meoncall` when `CODEX_HOME` is unset. Run from the checkout's root:
+
+   ```powershell
+   $meoncallCodexHome = $env:CODEX_HOME
+   if (-not $meoncallCodexHome) { $meoncallCodexHome = Join-Path $env:USERPROFILE '.codex' }
+   $meoncallSkillDir = Join-Path $meoncallCodexHome 'skills/meoncall'
+   if (Test-Path -LiteralPath $meoncallSkillDir) { throw 'MeOncall skill already exists; compare and update the installed copy, preserving personal changes.' }
+   New-Item -ItemType Directory -Path $meoncallSkillDir -Force | Out-Null
+   Copy-Item -LiteralPath './skills/meoncall/SKILL.md' -Destination $meoncallSkillDir
+   ```
+
+3. Start a new Codex chat and try: "Use $meoncall to list my reports."
+
+The bridge installer saves the checkout location in `~/.icm-oncall-workspace/bridge.json` for the skill to discover. If you move the checkout, rerun the installer there and follow the [bridge restart/reload instructions](bridge/README.md#install-once). After pulling skill updates, merge them into your installed copy, preserving local customizations.
 
 ## Code map
 
@@ -81,11 +97,13 @@ node bridge/cli.cjs status
 node bridge/cli.cjs call list_reports
 ```
 
-For authorized case updates: choose the active report, `read_incident`, then `save_incident` with explicit `reportId` and field-level `base` values. Preserve manual content and omitted fields. Saves track by default; use `tracked: false` to retain ignored/linked status. Read back after timeout/disconnect before retrying. Use the connected API directly rather than asking for JSON imports. Never print/commit generated `bridge-config.js`, the private bridge token/config, or credentials in notes.
+For case updates, request examples and conflict handling, follow the [agent workflow](bridge/README.md#agent-workflow).
 
 The bridge at `127.0.0.1:4176` writes one latest backup to `%USERPROFILE%\.icm-oncall-workspace\backup\oncall-workspace-backup.json`. The dashboard shows its full path/status and **Back up now**. Writes replace the file atomically; offline changes back up on reconnect. There is no history or cloud sync, and unsaved drafts are excluded. Workspace identity prevents a fresh profile from overwriting the old backup. **Restore saved backup / Import backup** adds report copies while preserving existing records and known Ignore/Restore decisions. Summary exports are not restorable backups.
 
 ## Development and verification
+
+Read [AGENTS.md](AGENTS.md) before changing the extension.
 
 ```powershell
 npm ci

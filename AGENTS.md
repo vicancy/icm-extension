@@ -1,6 +1,6 @@
 # Working on MeOncall
 
-- MeOncall is this local on-call dashboard and Edge extension, previously named ICM On-call Workspace. References to "our oncall dashboard" or "MeOncall" mean this project. The personal `$meoncall` skill locates the installed dashboard from other workspaces.
+- MeOncall is this local on-call dashboard and Edge extension. "Our oncall dashboard" refers to this project.
 
 - Keep the UI and saved handoff summaries in English.
 - Keep the OneNote/HTML/CSV export columns in this exact order: Day, RP/Runtime, Reported by customer, Severity, Status, # of customers impacted, # of occurrence, Root cause, Bug and/or ICM to external team, Error msg, Notes. Include saved Resolution content in Notes rather than adding a separate exported column.

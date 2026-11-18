@@ -1,8 +1,10 @@
 # MeOncall local agent API
 
-MeOncall (formerly ICM On-call Workspace) uses this API to write directly into the installed extension's `chrome.storage.local`. The open dashboard updates through its existing storage-change listener. It does not import a report or change official IcM fields.
+Read and update the installed extension's local incident annotations. Saves appear in the dashboard and leave official IcM fields unchanged.
 
 ## Install once
+
+With Node.js installed, run these commands from the root of your MeOncall checkout:
 
 ```powershell
 npm install
@@ -23,13 +25,17 @@ This protects against extension/profile removal, not loss of the same computer o
 
 ## Agent workflow
 
-The personal `$meoncall` skill provides discovery from other workspaces. On this machine the installed repository is `Q:\repos\oncall\icm-extension`. From any working directory, use the absolute path to `bridge/cli.cjs` (adjust the root if installed elsewhere):
+For Codex, [install the `$meoncall` skill](../README.md#install-the-codex-skill).
+
+For manual CLI use from any working directory, replace the example checkout path below with your own. JSON file paths are relative to your current working directory:
 
 ```powershell
-node Q:\repos\oncall\icm-extension\bridge\cli.cjs status
-node Q:\repos\oncall\icm-extension\bridge\cli.cjs call list_reports
-node Q:\repos\oncall\icm-extension\bridge\cli.cjs call read_incident read.json
-node Q:\repos\oncall\icm-extension\bridge\cli.cjs call save_incident save.json
+$meoncallRoot = 'C:\path\to\icm-extension'
+$meoncallCli = Join-Path $meoncallRoot 'bridge/cli.cjs'
+node $meoncallCli status
+node $meoncallCli call list_reports
+node $meoncallCli call read_incident read.json
+node $meoncallCli call save_incident save.json
 ```
 
 `read.json`:
@@ -45,10 +51,9 @@ node Q:\repos\oncall\icm-extension\bridge\cli.cjs call save_incident save.json
   "reportId": "ID returned by list_reports",
   "incidentId": "123456789",
   "fields": {
-    "rootCause": "Cross-tenant move prevented renewal of the old MSI credential.",
-    "resolution": "Operator reported completing cleanup. Ready for mitigation.",
-    "notes": "Evidence and any remaining follow-up."
-  }
+    "notes": "Existing notes.\nNew evidence and follow-up."
+  },
+  "base": {"notes": "Existing notes."}
 }
 ```
 
