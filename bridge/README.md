@@ -1,6 +1,6 @@
-# Local agent API
+# MeOncall local agent API
 
-The API writes directly into the installed extension's `chrome.storage.local`. The open dashboard updates through its existing storage-change listener. It does not import a report or change official IcM fields.
+MeOncall (formerly ICM On-call Workspace) uses this API to write directly into the installed extension's `chrome.storage.local`. The open dashboard updates through its existing storage-change listener. It does not import a report or change official IcM fields.
 
 ## Install once
 
@@ -23,13 +23,13 @@ This protects against extension/profile removal, not loss of the same computer o
 
 ## Agent workflow
 
-From any working directory, use the absolute path to `bridge/cli.cjs`:
+The personal `$meoncall` skill provides discovery from other workspaces. On this machine the installed repository is `Q:\repos\oncall\icm-extension`. From any working directory, use the absolute path to `bridge/cli.cjs` (adjust the root if installed elsewhere):
 
 ```powershell
-node bridge/cli.cjs status
-node bridge/cli.cjs call list_reports
-node bridge/cli.cjs call read_incident read.json
-node bridge/cli.cjs call save_incident save.json
+node Q:\repos\oncall\icm-extension\bridge\cli.cjs status
+node Q:\repos\oncall\icm-extension\bridge\cli.cjs call list_reports
+node Q:\repos\oncall\icm-extension\bridge\cli.cjs call read_incident read.json
+node Q:\repos\oncall\icm-extension\bridge\cli.cjs call save_incident save.json
 ```
 
 `read.json`:

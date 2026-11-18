@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "ICM On-call Workspace",
+  "name": "MeOncall",
   "version": "2.9.0",
   "description": "Track incidents, keep private notes, mitigate recovered incidents and export your handoff to OneNote.",
   "permissions": ["storage", "alarms", "contextMenus", "sidePanel"],
   "host_permissions": ["http://127.0.0.1:4176/*"],
   "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Open On-call Workspace" },
+  "action": { "default_title": "Open MeOncall" },
   "options_page": "dashboard.html",
   "side_panel": { "default_path": "monitor-panel.html" },
   "content_scripts": [

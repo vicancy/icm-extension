@@ -1,6 +1,8 @@
-# ICM On-call Workspace
+# MeOncall
 
-An English-language Edge extension for local incident investigation and OneNote handoffs. Track incidents, link repeated cases, ignore noise, keep Notes/Root cause/Resolution, and export a summary. Local annotations never update official ICM fields; **Quick Mitigate** is a separate, explicit official action.
+MeOncall is an English-language Edge extension for local incident investigation and OneNote handoffs, previously named **ICM On-call Workspace**. Track incidents, link repeated cases, ignore noise, keep Notes/Root cause/Resolution, and export a summary. Local annotations never update official ICM fields; **Quick Mitigate** is a separate, explicit official action.
+
+Use **MeOncall** as the stable product name in chats and skills. On this machine, the personal **`$meoncall`** skill at `C:\Users\lianwei\.codex\skills\meoncall\SKILL.md` maps that name and the old dashboard names to the installed repository and local API. It can be used from another working directory, for example: "Use $meoncall to record this case." The repository path, storage keys, bridge configuration, backup location and startup filename retain their existing names for compatibility.
 
 For a new session: read [AGENTS.md](AGENTS.md), check `git status`, and preserve existing edits. This README describes current behavior; [manifest.json](manifest.json) holds the extension version. Detailed agent API and backup setup lives in [bridge/README.md](bridge/README.md).
 
@@ -47,9 +49,11 @@ The source of truth is `chrome.storage.local['icm-oncall-workspace-v1']`: `works
 
 - Use native **Quick view** for details. No hover preview or automatic incident/date-card loading. Observe displayed title, severity, status and creation date only; never infer or overwrite investigation notes from page metadata.
 - Support Fluent query rows, legacy Search rows, recycled DOM nodes and SPA navigation. Filtering must collapse the Fluent cell wrapper as well as the row to avoid blank gaps.
+- Keep Fluent row actions and titles on one line when selection replaces the native cell classes; derive layout from the injected actions, not a class added to the native cell.
 - **Show tracked / linked**, **Show ignored**, and **Hide mitigated** persist across tabs. The last hides only Mitigated, not Resolved. Filters/counts cover loaded rows; native totals and pagination remain unchanged.
 - Native checkboxes drive bulk **Link / Ignore / Mitigate** (up to 200 visible loaded IDs). Select-all/Ctrl+A and range selection must exclude filtered rows using native checkbox events, not ARIA-only changes. If deselection fails, keep the row visible and block native bulk actions. Successful Link/Ignore clears the batch selection; failed saves retain it.
 - Keep the query toolbar above native controls from its first appearance; wait for its anchor. Selection must not change its height or wrap buttons: narrow windows scroll horizontally.
+- Keep incident actions in the page flow above the native action bar, below native panels/dialogs. Wait for the action bar during loading/remounts; never float them over form footers. Narrow windows scroll the buttons horizontally.
 
 **Quick Mitigate:** only an explicit user action starts the native workflow. Defaults are `Auto recovered`, How fixed = `Transient`, caused by change = `No`, and existing regions or `Global` when empty. It can affect correlated incidents. Submit once, never auto-retry, and report success only after observing Mitigated/Resolved. Batch execution skips closed incidents and stops on failure, cancellation, navigation/report change or an unconfirmed result. Never submit production incidents just to test it; the agent notes API cannot mitigate.
 

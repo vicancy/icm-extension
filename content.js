@@ -5,7 +5,7 @@
   const mitigate = IcmQuickMitigate;
   const ROWS = '.ms-DetailsRow[role="row"], .searchresults-k-grid .k-grid-content tr[role="row"]';
   const METADATA_FIELDS = M.METADATA_FIELDS;
-  let db, toolbar, editor, timer;
+  let db, toolbar, detailActions, editor, timer;
   let observing = false, observationReadback = false, bulkBusy = false;
   const observations = IcmObservations.create(M);
   const deselectionAttempts = new WeakMap();
@@ -172,7 +172,7 @@
       const row = controls.closest(ROWS);
       const snapshot = row ? context.rows.get(row) : controls._snapshot?.();
       if (!snapshot) { controls.hidden = true; continue; }
-      controls.hidden = false;
+      if (row) controls.hidden = false;
       const entry = context.report.entries[snapshot.id];
       const ignored = M.isIgnored(db, snapshot.id);
       const tracked = !ignored && entry?.tracked;
@@ -349,6 +349,25 @@
     const hidden = query && !anchor;
     if (toolbar.hidden !== hidden) toolbar.hidden = hidden;
   }
+  function positionDetailActions(detail) {
+    if (!detail || mitigate.managedFrame()) { detailActions?.remove(); detailActions = null; return; }
+    if (!detailActions) {
+      detailActions = controls(detailSnapshot, 'ico-detail-actions');
+      detailActions.setAttribute('role', 'group');
+      detailActions.setAttribute('aria-label', 'MeOncall incident actions');
+      detailActions.hidden = true;
+    }
+    const anchor = document.querySelector('#incident-details-container [aria-label="action-bar"]');
+    // Stay in the page flow, below native overlays. Never cover form footers
+    // while the incident action bar is loading or being remounted.
+    if (anchor) {
+      if (detailActions.nextElementSibling !== anchor) anchor.before(detailActions);
+    } else {
+      if (!detailActions.hidden) detailActions.hidden = true;
+      if (detailActions.parentElement !== document.body) document.body.appendChild(detailActions);
+    }
+    if (detailActions.hidden !== !anchor) detailActions.hidden = !anchor;
+  }
   function enhance() {
     if (!db) return;
     const context = listContext();
@@ -357,21 +376,19 @@
       const old = row.querySelector('.ico-row-actions');
       if (!snapshot?.cell) { old?.remove(); if (row.classList.contains('ico-row-hidden')) row.classList.remove('ico-row-hidden'); continue; }
       if (!old || old.parentElement !== snapshot.cell) {
-        old?.remove(); snapshot.cell.prepend(controls(() => rowSnapshot(row), 'ico-row-actions')); snapshot.cell.classList.add('ico-incident-cell');
+        old?.remove(); snapshot.cell.prepend(controls(() => rowSnapshot(row), 'ico-row-actions'));
       }
       snapshots.push({ id: snapshot.id, ...metadata(snapshot) });
     }
     const detail = detailSnapshot();
-    let dock = document.querySelector('.ico-detail-actions');
-    if (detail && !dock && !mitigate.managedFrame()) { dock = controls(detailSnapshot, 'ico-detail-actions'); document.body.appendChild(dock); }
-    else if (!detail) dock?.remove();
+    positionDetailActions(detail);
     if (detail) snapshots.push({ id: detail.id, ...metadata(detail) });
     for (const snapshot of snapshots) if (snapshot.status && mitigate.result(snapshot.id) === snapshot.status) mitigate.clearResult(snapshot.id);
     if (window.top === window.self && !toolbar) {
       toolbar = UI.node('div', 'ico-toolbar');
       toolbar.hidden = true;
       const name = UI.node('span', 'ico-report-name');
-      const open = UI.button('On-call dashboard', 'ico-primary');
+      const open = UI.button('MeOncall dashboard', 'ico-primary');
       open.addEventListener('click', () => request('open').catch(error => UI.toast(error.message, true)));
       const ignored = UI.button('Ignored', 'ico-subtle'); ignored.dataset.action = 'open-ignored';
       ignored.addEventListener('click', () => request('open-ignored').catch(error => UI.toast(error.message, true)));
