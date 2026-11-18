@@ -192,6 +192,10 @@
       }));
       if (!matches.length) choices.append(node('p', 'ico-muted', candidates.length ? 'No matching tracked incidents.' : 'Track a main incident first.'));
     }
+    const selectedIds = new Set(incidents.map(item => item.id));
+    if (Object.values(report.entries).some(item => selectedIds.has(item.summaryIncidentId))) {
+      editor.body.append(node('p', 'ico-muted', 'Existing related ICMs move with their summary. The summary\'s saved Notes are appended once.'));
+    }
     editor.body.append(searchField, choices);
     search.addEventListener('input', renderChoices);
     editor.form.addEventListener('submit', event => event.preventDefault());
@@ -204,7 +208,7 @@
     const list = node('div', 'ico-related-list');
     const wrapper = node('label', 'ico-field'); wrapper.append(node('span', 'ico-field-label', 'Add incident IDs or URLs'));
     const input = node('textarea', 'ico-input'); input.name = 'relatedIncidents'; input.rows = 3; input.maxLength = 20000; input.placeholder = '123456789, 987654321'; wrapper.append(input);
-    editor.body.append(list, wrapper);
+    editor.body.append(list, wrapper, node('p', 'ico-muted', 'Adding a summary also moves its related ICMs. The summary\'s saved Notes are appended once.'));
     function renderList() {
       const report = M.currentReport(currentDb, reportId);
       list.replaceChildren(...M.relatedEntries(report, incidentId).map(entry => {

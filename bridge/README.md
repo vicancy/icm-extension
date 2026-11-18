@@ -17,7 +17,7 @@ The CLI starts the local bridge as a hidden background process when needed. It b
 
 ## Automatic local backup
 
-The installer enables a single latest JSON backup at `~/.icm-oncall-workspace/backup/oncall-workspace-backup.json`, outside the Edge profile. Successful browser saves trigger a backup, and reconnecting backs up any changes made while the bridge was unavailable. The dashboard shows the file path, last success and any failure; **Back up now** retries. The backup includes all reports, annotations, Ignore/Restore decisions and list preferences. It never includes the bridge token/config, and it is not uploaded to a remote service.
+The installer enables a single latest JSON backup at `~/.icm-oncall-workspace/backup/oncall-workspace-backup.json`, outside the Edge profile. Successful browser saves trigger a backup, and reconnecting backs up any changes made while the bridge was unavailable. The dashboard's **More** menu shows the last success and any failure; **Copy backup path** provides the file path and **Back up now** retries when connected. The backup includes all reports, annotations, Ignore/Restore decisions and list preferences. It never includes the bridge token/config, and it is not uploaded to a remote service.
 
 The service validates the snapshot, writes and flushes a temporary file in the same folder, then replaces the existing backup. Short-lived Windows file locks are retried up to four times; persistent failures are reported without deleting or truncating the previous backup. It keeps no history. A new workspace identity after reinstall/profile reset cannot replace the old backup. **Restore saved backup** adds the old reports, preserves current records and known Ignore/Restore decisions, and resumes backup for the combined workspace. The JSON is also compatible with **Import backup**. Local storage remains the source of truth; unsaved editor drafts are not backed up.
 
@@ -63,7 +63,7 @@ For handoff fields, set `day` only from the actual ICM incident creation date (`
 
 `read_incident` also returns `ignored`. An ignored incident cannot be implicitly retracked by `save_incident`. To save authorized notes while keeping it ignored, explicitly include `"tracked": false` in `fields`; the user can Restore or Track it through **Ignored incidents**. Ignore/Restore and official mitigation are not exposed by this local notes API. `list_reports` counts exclude ignored incidents.
 
-`read_incident` returns `relatedIncidentIds` for a main summary and `entry.summaryIncidentId` for a related incident. Related incidents cannot be implicitly retracked by `save_incident`; use `"tracked": false` when saving their individual notes. The user manages links through **Link** / **Related ICMs** in the extension. A new link appends the source's saved Notes to the target's latest Notes with a newline, preserving the source; subsequent source edits are not synchronized. Root cause and Resolution are not merged. Related IDs export as numeric links directly below the main incident title in **Bug and/or ICM to external team**, and their number does not establish an occurrence or customer-impact count.
+`read_incident` returns `relatedIncidentIds` for a main summary and `entry.summaryIncidentId` for a related incident. Use `"tracked": false` when saving linked incidents' notes. Manage links through **Link** / **Related ICMs** in the dashboard; see [linking behavior](../README.md#data-and-behavior) for summary merges and Notes handling.
 
 ## HTTP contract
 

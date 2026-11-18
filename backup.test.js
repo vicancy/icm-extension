@@ -122,7 +122,7 @@ test('fresh install protects the old backup and explicit recovery preserves new 
   const db = await runtime.request('get');
   await runtime.request('save', { reportId: db.activeReportId, incidentId: '789', patch: { notes: 'New manual note' } });
   await eventually(async () => (await runtime.request('bridge-status')).backup?.state === 'conflict');
-  page.document.querySelector('#agent-status').click();
+  page.document.querySelector('#more').click();
   await waitFor(() => !page.document.querySelector('#restore-backup').hidden);
   assert.match(page.document.querySelector('#auto-backup-status').textContent, /recovery available/);
   assert.deepEqual(await readFile(file), original);
@@ -150,14 +150,14 @@ test('backups larger than the notes API request limit work and failures appear i
   assert.deepEqual(await readFile(file), original);
   let copied;
   Object.defineProperty(page.window.navigator, 'clipboard', { value: { async writeText(value) { copied = value; } } });
-  page.document.querySelector('#agent-status').click();
-  await waitFor(() => page.document.querySelector('#auto-backup-path').textContent === file);
+  page.document.querySelector('#more').click();
+  await waitFor(() => page.document.querySelector('#copy-backup-path').title === file);
   page.document.querySelector('#copy-backup-path').click();
   await waitFor(() => copied === file);
   await fs.writeFile(file, 'do not overwrite corrupt backup');
   await runtime.request('save', { reportId: original.activeReportId, incidentId: '123', patch: { notes: 'Saved locally' } });
   await eventually(async () => (await runtime.request('bridge-status')).backup?.state === 'error');
-  page.document.querySelector('#agent-status').click();
+  page.document.querySelector('#more').click();
   await waitFor(() => page.document.querySelector('#auto-backup-status').textContent.includes('needs attention'));
   assert.match(page.document.querySelector('#auto-backup-detail').textContent, /left untouched/);
   assert.equal((await runtime.request('get')).reports[0].entries['123'].notes, 'Saved locally');

@@ -337,16 +337,20 @@
   function positionToolbar() {
     if (!toolbar) return;
     const query = isQueryPage();
+    const detail = !!M.incidentId(location.href);
     const anchor = query && (document.querySelector('[role="menubar"][aria-label="Bulk actions"]')?.closest('.ms-Stack')
       || document.querySelector('.searchresults-k-grid'));
-    // A query toolbar has no floating fallback. Keep it hidden until its
-    // destination exists, including while ICM remounts the list controls.
-    if (query && !anchor && !toolbar.hidden) toolbar.hidden = true;
+    // Keep workspace navigation in the incident action bar on detail pages.
+    // Both inline placements wait for their native anchor during remounts.
+    const hidden = query ? !anchor : detail && (!detailActions?.isConnected || detailActions.hidden);
+    if (hidden && !toolbar.hidden) toolbar.hidden = true;
     if (toolbar.classList.contains('ico-toolbar-inline') !== query) toolbar.classList.toggle('ico-toolbar-inline', query);
-    if (anchor) {
+    if (toolbar.classList.contains('ico-toolbar-detail') !== detail) toolbar.classList.toggle('ico-toolbar-detail', detail);
+    if (detail && detailActions) {
+      if (toolbar.parentElement !== detailActions) detailActions.appendChild(toolbar);
+    } else if (anchor) {
       if (toolbar.nextElementSibling !== anchor) anchor.before(toolbar);
     } else if (toolbar.parentElement !== document.body) document.body.appendChild(toolbar);
-    const hidden = query && !anchor;
     if (toolbar.hidden !== hidden) toolbar.hidden = hidden;
   }
   function positionDetailActions(detail) {

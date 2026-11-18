@@ -15,9 +15,9 @@ async function main() {
     { id: '120000102', title: 'Related allocation failure in a second subscription', severity: '3', status: 'Resolved', category: 'Runtime', reportedByCustomer: 'Yes', rootCause: 'Regional capacity exhausted during scale-out.', resolution: 'Moved workloads to an available capacity pool.', notes: 'Confirmed recovery with the second subscription owner.', summaryGroup: 'Regional capacity', customersImpacted: '2', occurrences: '2' },
     { id: '120000101', title: 'Allocation failures during regional scale-out', severity: '2', status: 'Mitigated', category: 'Runtime', reportedByCustomer: 'Yes', rootCause: 'Regional capacity exhausted during scale-out.', resolution: 'Moved workloads to an available capacity pool.', notes: 'Capacity follow-up remains open with the owning team.', summaryGroup: 'Regional capacity', customersImpacted: '2', occurrences: '2', relatedLinks: 'https://example.com/bugs/capacity-follow-up', errorMessage: 'AllocationFailed' }
   ];
-  for (const { id, ...fields } of samples) await runtime.request('save', { reportId, incidentId: id, patch: { tracked: true, ...fields } });
+  for (const [index, { id, ...fields }] of samples.entries()) await runtime.request('save', { reportId, incidentId: id, patch: { tracked: true, day: index ? `2026-11-${19 - index}` : '', ...fields } });
 
-  const assetNames = ['model.js', 'client.js', 'ui.js', 'mitigate.js', 'observations.js', 'content.js', 'content.css', 'dashboard.js', 'dashboard.css', 'ignored.js', 'test/browser-bridge.js'];
+  const assetNames = ['model.js', 'client.js', 'ui.js', 'mitigate.js', 'observations.js', 'content.js', 'content.css', 'dashboard.js', 'dashboard.css', 'ignored.js', 'test/browser-bridge.js', 'icons/icon-32.png'];
   const assets = new Map(assetNames.map(name => [`/${name}`, path.join(root, name)]));
   const scripts = '<script src="/test/browser-bridge.js"></script>' + ['model.js', 'client.js', 'ui.js', 'mitigate.js', 'observations.js', 'content.js'].map(file => `<script src="/${file}" defer></script>`).join('');
   const fixture = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synthetic ICM list</title><link rel="stylesheet" href="/content.css">${scripts}<style>
@@ -42,7 +42,7 @@ async function main() {
       }
       if (url.pathname === '/fixture-list.html') return send(200, fixture);
       if (url.pathname === '/report.html') return send(200, `<!doctype html><html lang="en"><meta charset="utf-8"><title>Sample on-call export</title><body>${M.exportReport(M.reportForDisplay(await runtime.request('get'))).html}</body></html>`);
-      if (assets.has(url.pathname)) return send(200, fs.readFileSync(assets.get(url.pathname)), url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript');
+      if (assets.has(url.pathname)) return send(200, fs.readFileSync(assets.get(url.pathname)), { '.css': 'text/css', '.js': 'text/javascript', '.png': 'image/png' }[path.extname(url.pathname)]);
       send(404, 'Not found');
     } catch (error) { send(500, JSON.stringify({ ok: false, error: error.message }), 'application/json'); }
   });

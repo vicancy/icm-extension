@@ -70,23 +70,25 @@ async function dashboard(t) {
   return { runtime, page, copies };
 }
 
-test('both dashboard Copy buttons apply the exclusive range, independently of search filters', async t => {
+test('dashboard Copy applies the header option and exclusive range, independently of search filters', async t => {
   const { page, copies } = await dashboard(t); const d = page.document;
   input(page, 'copy-after', '31000000000123'); input(page, 'search', '999');
   assert.equal(d.querySelectorAll('#incidents tr').length, 1);
-  assert.match(d.getElementById('copy-range-status').textContent, /2 incidents · 2 rows/);
-  for (const button of ['copy', 'copy-without-headers']) {
-    click(d.getElementById(button)); await waitFor(() => d.getElementById('copy-range-status').textContent.startsWith('Copied'));
+  assert.match(d.getElementById('copy-range-status').textContent, /2 rows to copy/);
+  for (const includeHeaders of [true, false]) {
+    d.getElementById('include-headers').checked = includeHeaders;
+    d.getElementById('include-headers').dispatchEvent(new page.window.Event('change'));
+    click(d.getElementById('copy')); await waitFor(() => d.getElementById('copy-range-status').textContent.startsWith('Copied'));
     const copied = copies.at(-1); const exported = new page.window.DOMParser().parseFromString(copied['text/html'], 'text/html');
     assert.equal(exported.querySelectorAll('tbody tr').length, 2);
-    assert.equal(exported.querySelectorAll('th').length, button === 'copy' ? 11 : 0);
-    assert.equal(exported.querySelectorAll('h2').length, button === 'copy' ? 1 : 0);
+    assert.equal(exported.querySelectorAll('th').length, includeHeaders ? 11 : 0);
+    assert.equal(exported.querySelectorAll('h2').length, includeHeaders ? 1 : 0);
     assert.doesNotMatch(copied['text/plain'], /31000000000123|Incident 999/);
     assert.match(copied['text/plain'], /Incident 123/); assert.match(copied['text/plain'], /Incident 122/);
-    assert.match(d.getElementById('copy-range-status').textContent, /next batch, copy after #122/);
+    assert.match(d.getElementById('copy-range-status').textContent, /Next: #122/);
   }
   assert.equal(copies.length, 2);
-  input(page, 'copy-after', ''); click(d.getElementById('copy-without-headers'));
+  input(page, 'copy-after', ''); click(d.getElementById('copy'));
   assert.equal(copies.length, 3); assert.match(copies.at(-1)['text/plain'], /Incident 999/);
 });
 
@@ -94,7 +96,7 @@ test('invalid and empty ranges leave the clipboard alone, and switching reports 
   const { runtime, page, copies } = await dashboard(t); const d = page.document;
   for (const value of ['not-an-id', '888', '122']) {
     input(page, 'copy-after', value);
-    assert.equal(d.getElementById('copy').disabled, true); assert.equal(d.getElementById('copy-without-headers').disabled, true);
+    assert.equal(d.getElementById('copy').disabled, true);
     await assert.rejects(page.window.IcmOncallUI.copyReport(M.currentReport(await runtime.request('get')), { afterIncident: value, includeHeaders: false }));
   }
   assert.equal(copies.length, 0); assert.match(d.getElementById('copy-range-status').textContent, /No newly tracked incidents/);
@@ -108,7 +110,7 @@ test('rich clipboard failures keep the starting ICM and do not report success', 
   const { page, copies } = await dashboard(t); const d = page.document;
   page.window.ClipboardItem = class { constructor(values) { this.values = values; } };
   Object.defineProperty(page.window.navigator, 'clipboard', { value: { async write() { throw new Error('Clipboard permission denied'); } } });
-  input(page, 'copy-after', '31000000000123'); click(d.getElementById('copy-without-headers'));
+  input(page, 'copy-after', '31000000000123'); d.getElementById('include-headers').checked = false; click(d.getElementById('copy'));
   await waitFor(() => d.getElementById('copy-range-status').textContent === 'Clipboard permission denied');
   assert.equal(d.getElementById('copy-after').value, '31000000000123'); assert.equal(copies.length, 0);
 });

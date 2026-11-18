@@ -44,7 +44,7 @@ test('recycled rows and removed controls bind to the current incident ID', async
   assert.equal(d.querySelector('[data-action="track"]').textContent, 'Tracked');
 });
 
-test('the query toolbar waits for its top position without a bottom flash and reuses the same controls after remounts', async t => {
+test('the toolbar stays inline through query/detail navigation and native control remounts', async t => {
   const page = loadPage(createRuntime()); t.after(page.close); const d = page.document;
   const style = d.createElement('style'); style.textContent = fs.readFileSync(path.join(__dirname, 'content.css'), 'utf8'); d.head.append(style);
   await waitFor(() => d.querySelector('.ico-toolbar'));
@@ -69,17 +69,35 @@ test('the query toolbar waits for its top position without a bottom flash and re
   assert.equal(d.querySelectorAll('.ico-toolbar').length, 1);
   page.dom.reconfigure({ url: M.incidentUrl('123') });
   await waitFor(() => d.querySelector('.ico-detail-actions'));
-  assert.equal(d.querySelector('.ico-toolbar').parentElement, d.body);
+  const detailActions = d.querySelector('.ico-detail-actions');
+  assert.equal(toolbar.parentElement, detailActions);
   assert.equal(d.querySelector('.ico-toolbar-inline'), null);
-  assert.equal(toolbar.hidden, false);
+  assert.equal(toolbar.hidden, true);
+  assert.equal(page.window.getComputedStyle(toolbar).position, 'static');
+  const incident = d.createElement('main'); incident.id = 'incident-details-container';
+  const actionsMarkup = '<section><div aria-label="action-bar"></div></section>';
+  incident.innerHTML = actionsMarkup; d.body.append(incident);
+  await waitFor(() => !toolbar.hidden);
+  assert.equal(detailActions.nextElementSibling, incident.querySelector('[aria-label="action-bar"]'));
+  assert.equal(toolbar.parentElement, detailActions);
+  assert.equal(toolbar.querySelector('.ico-list-filters').hidden, true);
+  assert.equal(toolbar.querySelector('.ico-bulk-actions').hidden, true);
+  incident.replaceChildren();
+  await waitFor(() => toolbar.hidden);
+  incident.innerHTML = actionsMarkup;
+  await waitFor(() => !toolbar.hidden && incident.contains(toolbar));
+  assert.equal(d.querySelectorAll('.ico-toolbar').length, 1);
+  assert.equal(d.querySelectorAll('.ico-detail-actions').length, 1);
   nativeControls.remove();
   page.dom.reconfigure({ url: 'https://portal.microsofticm.com/imp/v5/incidents/queries/my-teams' });
   d.body.append(d.createElement('section'));
   await waitFor(() => toolbar.hidden && toolbar.classList.contains('ico-toolbar-inline'));
   assert.equal(page.window.getComputedStyle(toolbar).display, 'none');
   d.body.prepend(nativeControls);
-  await waitFor(() => !toolbar.hidden && nativeControls.querySelector('.ico-toolbar'));
+  await waitFor(() => !toolbar.hidden && nativeControls.querySelector('.ico-toolbar') && !d.querySelector('.ico-detail-actions'));
   assert.equal(nativeControls.querySelector('.ico-toolbar'), toolbar);
+  assert.equal(d.querySelector('.ico-toolbar-detail'), null);
+  assert.equal(d.querySelector('.ico-detail-actions'), null);
 });
 
 test('a failed save leaves the draft visible and retry succeeds', async t => {
@@ -294,17 +312,19 @@ test('an unacknowledged metadata save is read back without replaying a committed
   assert.equal(runtime.messages.filter(message => message.type === 'oncall:observe').length, 1);
 });
 
-test('dashboard search renders locally and preserves the unavailable backup controls', async t => {
+test('dashboard search renders locally and keeps unavailable backup controls hidden', async t => {
   const runtime = createRuntime(); const reportId = (await runtime.request('get')).activeReportId;
   await runtime.request('save', { reportId, incidentId: '123', patch: { tracked: true, title: 'Sample incident' } });
   const page = loadPage(runtime, { dashboard: true }); t.after(page.close);
-  await waitFor(() => page.document.querySelectorAll('#incidents tr').length === 1 && page.document.querySelector('#agent-status').textContent === 'Agent: not installed');
+  await waitFor(() => page.document.querySelectorAll('#incidents tr').length === 1 && page.document.querySelector('#auto-backup-status').dataset.state === 'not-installed');
   const beforeSearch = runtime.messages.length;
   const search = page.document.querySelector('#search');
   for (const query of ['S', 'Sa', 'Sample']) {
     search.value = query; search.dispatchEvent(new page.window.Event('input'));
     assert.equal(page.document.querySelectorAll('#incidents tr').length, 1);
     assert.equal(page.document.querySelector('#backup-now').disabled, true);
+    assert.equal(page.document.querySelector('#backup-now').hidden, true);
+    assert.equal(page.document.querySelector('#auto-backup-info').hidden, true);
   }
   assert.equal(runtime.messages.length, beforeSearch, 'search must not request bridge or workspace data');
 });
@@ -342,7 +362,7 @@ test('dashboard tracks incidents, edits notes, filters incomplete work and remov
   click(d.querySelector('[aria-label="Edit notes for incident 123"]'));
   set(d, 'rootCause', 'Capacity'); set(d, 'resolution', 'Increased allocation'); set(d, 'notes', 'Verified recovery'); submit(d);
   await waitFor(() => !d.querySelector('.ico-editor'));
-  assert.equal(d.querySelector('#root-count').textContent, '0');
+  assert.equal(d.querySelector('#filter option[value="incomplete"]').textContent, 'Needs summary (0)');
   d.querySelector('#filter').value = 'incomplete'; d.querySelector('#filter').dispatchEvent(new page.window.Event('change'));
   assert.equal(d.querySelectorAll('#incidents tr').length, 0);
   d.querySelector('#filter').value = 'all'; d.querySelector('#filter').dispatchEvent(new page.window.Event('change'));

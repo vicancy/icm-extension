@@ -77,7 +77,6 @@ function applyLinks(db, message) {
     if (typeof expected !== 'string' || (currentTarget !== expected && currentTarget !== targetId)) throw new Error('The related incident changed in another window. Reopen it and try again.');
     if (targetId && (typeof message.baseTracked?.[source.id] !== 'boolean'
       || (previous.tracked !== message.baseTracked[source.id] && currentTarget !== targetId))) throw new Error('Tracking changed in another window. Reopen Link and try again.');
-    if (targetId && related.has(source.id)) throw new Error('Unlink this incident\'s related ICMs before linking it to another summary.');
     const ignored = M.isIgnored(db, source.id);
     if (targetId && (typeof message.baseIgnored?.[source.id] !== 'boolean' || message.baseIgnored[source.id] !== ignored)) throw new Error('Ignore changed in another window. Reopen Link and try again.');
     const patch = {};
@@ -91,10 +90,20 @@ function applyLinks(db, message) {
     next.updatedAt = Date.now();
     updates.set(source.id, next);
   }
+  const selectedIds = new Set(updates.keys());
   if (targetId) {
+    // Move each summary's current children directly to the new summary. Keep
+    // their latest annotations and any metadata supplied in the same batch.
+    for (const id of selectedIds) {
+      for (const entry of related.get(id) || []) {
+        updates.set(entry.id, { ...(updates.get(entry.id) || entry), summaryIncidentId: targetId, tracked: false, updatedAt: Date.now() });
+      }
+    }
     // Append from the latest saved records inside the serialized operation.
-    // Deduplicate IDs via updates, and do not append again on a link retry.
-    const additions = [...updates.keys()]
+    // A summary already holds its children's appended Notes; carry it once,
+    // even when a child is also selected. Retries do not append again.
+    const additions = [...selectedIds]
+      .filter(id => !selectedIds.has(report.entries[id]?.summaryIncidentId))
       .filter(id => report.entries[id]?.summaryIncidentId !== targetId)
       .map(id => M.knownText(report.entries[id]?.notes))
       .filter(notes => notes.trim());
@@ -107,7 +116,8 @@ function applyLinks(db, message) {
   }
   for (const [id, entry] of updates) {
     report.entries[id] = entry;
-    if (targetId && M.isIgnored(db, id)) db.ignoredIncidents[id] = { ...db.ignoredIncidents[id], ignored: false, updatedAt: Date.now() };
+    // Only explicitly selected incidents are restored from Ignore.
+    if (targetId && selectedIds.has(id) && M.isIgnored(db, id)) db.ignoredIncidents[id] = { ...db.ignoredIncidents[id], ignored: false, updatedAt: Date.now() };
   }
   report.updatedAt = Date.now();
 }
